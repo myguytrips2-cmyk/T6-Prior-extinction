@@ -185,7 +185,7 @@ scrollFrame.Size = UDim2.new(1, 0, 1, -35)
 scrollFrame.Position = UDim2.new(0, 0, 0, 35)
 scrollFrame.BackgroundTransparency = 1
 scrollFrame.BorderSizePixel = 0
-scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 520)
+scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 380) -- Updated dynamically via Whitelist toggle state
 scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 80)
 scrollFrame.ScrollBarThickness = 5
 scrollFrame.Parent = mainFrame
@@ -216,9 +216,11 @@ local function createToggleButton(name: string, defaultText: string, order: numb
 	local button = Instance.new("TextButton")
 	button.Name = name
 	button.Size = UDim2.new(1, -20, 0, 32)
+	button.BackgroundColor3 = Color3.fromRGB(150, 0, 0) -- Muted dark Red (Default OFF state)
+	button.Text = defaultText .. " (OFF)"
+	button.TextColor3 = Color3.fromRGB(255, 255, 255)
 	button.TextSize = 12
 	button.Font = Enum.Font.SourceSansBold
-	button.TextColor3 = Color3.fromRGB(255, 255, 255)
 	button.LayoutOrder = order
 	button.Parent = scrollFrame
 
@@ -229,15 +231,15 @@ local function createToggleButton(name: string, defaultText: string, order: numb
 	return button
 end
 
--- Toggle Buttons Definition (Order 1 - 8)
+-- 1. BUTTON TEXT LABEL MAPPING
 local trackingBtn = createToggleButton("ToggleTracking", "X-Ray Tracking", 1)
-local envBtn = createToggleButton("ToggleEnv", "Clear Water & Fog", 2)
-local sleepBtn = createToggleButton("ToggleSleep", "Bypass Sleep GUI", 3)
-local fullbrightBtn = createToggleButton("ToggleFullbright", "Fullbright", 4)
-local packBtn = createToggleButton("TogglePack", "Pack Density Monitor", 5)
-local carcassBtn = createToggleButton("ToggleCarcass", "Carcass Analytics", 6)
-local rangeBtn = createToggleButton("ToggleRange", "Bite Range Finder", 7)
-local rejoinBtn = createToggleButton("ToggleRejoin", "Rejoin Command", 8)
+local whitelistBtn = createToggleButton("ToggleWhitelistMenu", "Radar Whitelist Manager", 2)
+local packBtn = createToggleButton("TogglePack", "Pack Density Monitor", 3)
+local carcassBtn = createToggleButton("ToggleCarcass", "Carcass Analytics", 4)
+local rangeBtn = createToggleButton("ToggleRange", "Bite Range Finder", 5)
+local fullbrightBtn = createToggleButton("ToggleFullbright", "Fullbright", 6)
+local envBtn = createToggleButton("ToggleEnv", "Clear Water & Fog", 7)
+local sleepBtn = createToggleButton("ToggleSleep", "Bypass Sleep GUI", 8)
 
 -- Pack Spacing HUD Label (Positions directly below button layout)
 local packSpacingHUD = Instance.new("TextLabel")
@@ -346,57 +348,42 @@ autoCorner.CornerRadius = UDim.new(0, 4)
 autoCorner.Parent = autoFillBtn
 
 --------------------------------------------------------------------------------
--- SYSTEM NOTIFICATION CREATOR
+-- DRAG MECHANICS DESIGN
 --------------------------------------------------------------------------------
-local function spawnProximityNotification(displayName: string, speciesName: string, studDistance: number, alertTier: number)
-	local meters = math.round(studDistance / 20)
+local dragging, dragInput, dragStart, startPos
 
-	-- Multi-tiered Color Resolution
-	local cardColor = Color3.fromRGB(0, 200, 0) -- Tier 1 (Caution)
-	if alertTier == 2 then
-		cardColor = Color3.fromRGB(255, 140, 0) -- Tier 2 (Warning)
-	elseif alertTier == 3 then
-		cardColor = Color3.fromRGB(220, 0, 0) -- Tier 3 (Critical Alert)
-	end
+headerFrame.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = mainFrame.Position
 
-	local notifFrame = Instance.new("Frame")
-	notifFrame.Size = UDim2.new(1, 0, 0, 40)
-	notifFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	notifFrame.BackgroundTransparency = 0.2
-	notifFrame.BorderSizePixel = 0
-
-	local notifCorner = Instance.new("UICorner")
-	notifCorner.CornerRadius = UDim.new(0, 6)
-	notifCorner.Parent = notifFrame
-
-	local notifLabel = Instance.new("TextLabel")
-	notifLabel.Size = UDim2.new(1, -20, 1, 0)
-	notifLabel.Position = UDim2.new(0, 10, 0, 0)
-	notifLabel.BackgroundTransparency = 1
-	notifLabel.TextColor3 = cardColor
-	notifLabel.TextSize = 11
-	notifLabel.Font = Enum.Font.SourceSansBold
-	notifLabel.TextXAlignment = Enum.TextXAlignment.Left
-	notifLabel.Text = string.format("%s (%s) has entered within %dm", displayName, speciesName, meters)
-	notifLabel.Parent = notifFrame
-
-	notifFrame.Parent = notificationContainer
-
-	task.delay(4, function()
-		if not notifFrame.Parent then return end
-		local fadeTween = TweenService:Create(notifFrame, TweenInfo.new(1), {BackgroundTransparency = 1})
-		local textTween = TweenService:Create(notifLabel, TweenInfo.new(1), {TextTransparency = 1})
-		fadeTween:Play()
-		textTween:Play()
-		
-		fadeTween.Completed:Connect(function()
-			notifFrame:Destroy()
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				dragging = false
+			end
 		end)
-	end)
-end
+	end
+end)
+
+headerFrame.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+
+_G.MasterUtilityConnections.DragInput = UserInputService.InputChanged:Connect(function(input)
+	if input == dragInput and dragging then
+		local delta = input.Position - dragStart
+		mainFrame.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+	end
+end)
 
 --------------------------------------------------------------------------------
--- STABLE SPATIAL UTILITIES & HELPERS
+-- STABLE SPATIAL UTILITIES, HELPERS & COMPLEMENTS
 --------------------------------------------------------------------------------
 local function escapePattern(str: string): string
 	return string.gsub(str, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
@@ -620,18 +607,34 @@ local function createRangeSphere(attachPart: BasePart)
 	rangeSpherePart = sphere
 end
 
+-- ============================================================================
+-- HOISTED METRIC RETRIEVAL: SAFE LATENCY OVERRIDE (CORRECTED)
+-- Fully declared at the top level of the script to prevent nil-calling crashes.
+-- ============================================================================
 local function getPlayerPing(): number
-	local success, ping = pcall(function()
-		local stats = game:GetService("Stats")
-		local network = stats:FindFirstChild("Network")
+	local defaultPing = 0.05 -- 50ms baseline default fallback (seconds)
+	
+	local success, result = pcall(function()
+		local statsService = game:GetService("Stats")
+		local network = statsService:FindFirstChild("Network")
 		local serverStats = network and network:FindFirstChild("ServerStatsItem")
 		local pingItem = serverStats and serverStats:FindFirstChild("Ping")
+		
 		if pingItem then
-			return pingItem:GetValue() / 1000
+			-- Execute GetValue() inside a guarded check
+			local val = pingItem:GetValue()
+			if typeof(val) == "number" then
+				return val / 1000 -- Convert milliseconds to seconds
+			end
 		end
-		return 0.1
+		return defaultPing
 	end)
-	return success and ping or 0.1
+	
+	if success and typeof(result) == "number" then
+		return result
+	end
+	
+	return defaultPing
 end
 
 --------------------------------------------------------------------------------
@@ -861,75 +864,85 @@ local function clearCarcassOverlays()
 end
 
 --------------------------------------------------------------------------------
--- CHAT DEPLOYMENT COMMANDS
+-- REVISED UI PANEL ASSEMBLY & COMPONENT INTERACTIVE STATE WIRING
 --------------------------------------------------------------------------------
-local function handleChat(message: string)
-	local splitMessage = string.split(message, " ")
-	local command = splitMessage[1]
-	local targetName = splitMessage[2]
-
-	if targetName then
-		if command == "!wl" then
-			addPlayerToWhitelist(targetName)
-		elseif command == "!unwl" then
-			local cleanNameLower = string.lower(string.gsub(targetName, "^%s*(.-)%s*$", "%1"))
-			local index = table.find(WhitelistedTable, cleanNameLower)
-			if index then
-				table.remove(WhitelistedTable, index)
-				print("[TELEMETRY] Removed Whitelist: " .. targetName)
-			end
-		end
-	elseif rejoinCommandEnabled and string.lower(message) == "!rejoin" then
-		pcall(function()
-			TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, localPlayer)
-		end)
+-- Helper to update button visual colors and text states
+local function updateButtonState(button: TextButton, state: boolean, text: string)
+	if state then
+		button.BackgroundColor3 = Color3.fromRGB(0, 150, 0) -- Vibrant Green (ON)
+		button.Text = text .. " (ON)"
+	else
+		button.BackgroundColor3 = Color3.fromRGB(150, 0, 0) -- Muted dark Red (OFF)
+		button.Text = text .. " (OFF)"
 	end
 end
 
-_G.MasterUtilityConnections.Chatted = localPlayer.Chatted:Connect(handleChat)
+-- Setup Whitelist Submenu Visibility Toggle Logic
+local function updateSubmenuVisibility(state: boolean)
+	whitelistSectionLabel.Visible = state
+	inputContainer.Visible = state
+	whitelistScroll.Visible = state
+	autoFillBtn.Visible = state
+	
+	-- Dynamically adjust main ScrollingFrame CanvasSize based on visibility states
+	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, state and 540 or 380)
+end
 
---------------------------------------------------------------------------------
--- BUTTON BINDINGS & CONNECTIONS
---------------------------------------------------------------------------------
-setButtonState(trackingBtn, trackingEnabled, "X-Ray Tracking")
-setButtonState(envBtn, environmentOverridesEnabled, "Clear Water & Fog")
-setButtonState(sleepBtn, bypassSleepEnabled, "Bypass Sleep GUI")
-setButtonState(fullbrightBtn, fullbrightActive, "Fullbright")
-setButtonState(packBtn, packDensityActive, "Pack Density Monitor")
-setButtonState(carcassBtn, carcassScannerActive, "Carcass Analytics")
-setButtonState(rangeBtn, rangeFinderActive, "Bite Range Finder")
-setButtonState(rejoinBtn, rejoinCommandEnabled, "Rejoin Command")
+-- Initializing visual states to their respective runtime configurations
+updateButtonState(trackingBtn, trackingEnabled, "X-Ray Tracking")
+updateButtonState(whitelistBtn, false, "Radar Whitelist Manager") -- Starts closed
+updateButtonState(packBtn, packDensityActive, "Pack Density Monitor")
+updateButtonState(carcassBtn, carcassScannerActive, "Carcass Analytics")
+updateButtonState(rangeBtn, rangeFinderActive, "Bite Range Finder")
+updateButtonState(fullbrightBtn, fullbrightActive, "Fullbright")
+updateButtonState(envBtn, environmentOverridesEnabled, "Clear Water & Fog")
+updateButtonState(sleepBtn, bypassSleepEnabled, "Bypass Sleep GUI")
 
+-- Initialize whitelist sub-menu to off on script startup
+updateSubmenuVisibility(false)
+
+-- 2. INTERACTIVE TOGGLE COLORIZATION & EVENT BINDINGS
 trackingBtn.MouseButton1Click:Connect(function()
 	trackingEnabled = not trackingEnabled
-	setButtonState(trackingBtn, trackingEnabled, "X-Ray Tracking")
+	updateButtonState(trackingBtn, trackingEnabled, "X-Ray Tracking")
 	if not trackingEnabled then
-		for model in pairs(activeOverlays) do untrackEntity(model) end
-	end
-end)
-
-envBtn.MouseButton1Click:Connect(function()
-	environmentOverridesEnabled = not environmentOverridesEnabled
-	setButtonState(envBtn, environmentOverridesEnabled, "Clear Water & Fog")
-	if not environmentOverridesEnabled then
-		terrain.WaterTransparency = originalWaterTransparency
-		terrain.WaterReflectance = originalWaterReflectance
-		Lighting.FogEnd = originalFogEnd
-		for atmosphere, originalDensity in pairs(originalAtmosphereDensities) do
-			if atmosphere.Parent then atmosphere.Density = originalDensity end
+		for model in pairs(activeOverlays) do
+			untrackEntity(model)
 		end
 	end
 end)
 
-sleepBtn.MouseButton1Click:Connect(function()
-	bypassSleepEnabled = not bypassSleepEnabled
-	setButtonState(sleepBtn, bypassSleepEnabled, "Bypass Sleep GUI")
+whitelistBtn.MouseButton1Click:Connect(function()
+	local submenuState = not whitelistSectionLabel.Visible
+	updateButtonState(whitelistBtn, submenuState, "Radar Whitelist Manager")
+	updateSubmenuVisibility(submenuState)
+end)
+
+packBtn.MouseButton1Click:Connect(function()
+	packDensityActive = not packDensityActive
+	updateButtonState(packBtn, packDensityActive, "Pack Density Monitor")
+end)
+
+carcassBtn.MouseButton1Click:Connect(function()
+	carcassScannerActive = not carcassScannerActive
+	updateButtonState(carcassBtn, carcassScannerActive, "Carcass Analytics")
+	if not carcassScannerActive then
+		clearCarcassOverlays()
+	end
+end)
+
+rangeBtn.MouseButton1Click:Connect(function()
+	rangeFinderActive = not rangeFinderActive
+	updateButtonState(rangeBtn, rangeFinderActive, "Bite Range Finder")
+	if not rangeFinderActive then
+		clearRangeSphere()
+	end
 end)
 
 fullbrightBtn.MouseButton1Click:Connect(function()
 	fullbrightActive = not fullbrightActive
-	setButtonState(fullbrightBtn, fullbrightActive, "Fullbright")
-
+	updateButtonState(fullbrightBtn, fullbrightActive, "Fullbright")
+	
 	if not fullbrightActive then
 		Lighting.GlobalShadows = originalGlobalShadows
 		Lighting.Ambient = originalAmbient
@@ -939,50 +952,25 @@ fullbrightBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
-packBtn.MouseButton1Click:Connect(function()
-	packDensityActive = not packDensityActive
-	setButtonState(packBtn, packDensityActive, "Pack Density Monitor")
-end)
-
-carcassBtn.MouseButton1Click:Connect(function()
-	carcassScannerActive = not carcassScannerActive
-	setButtonState(carcassBtn, carcassScannerActive, "Carcass Analytics")
-	if not carcassScannerActive then clearCarcassOverlays() end
-end)
-
-rangeBtn.MouseButton1Click:Connect(function()
-	rangeFinderActive = not rangeFinderActive
-	setButtonState(rangeBtn, rangeFinderActive, "Bite Range Finder")
-	if not rangeFinderActive then clearRangeSphere() end
-end)
-
-rejoinBtn.MouseButton1Click:Connect(function()
-	rejoinCommandEnabled = not rejoinCommandEnabled
-	setButtonState(rejoinBtn, rejoinCommandEnabled, "Rejoin Command")
-end)
-
-addWhitelistBtn.MouseButton1Click:Connect(function()
-	addPlayerToWhitelist(whitelistInput.Text)
-	whitelistInput.Text = ""
-end)
-
-autoFillBtn.MouseButton1Click:Connect(function()
-	for _, player in ipairs(Players:GetPlayers()) do
-		if isAlliedPackMember(player) then
-			addPlayerToWhitelist(player.DisplayName)
+envBtn.MouseButton1Click:Connect(function()
+	environmentOverridesEnabled = not environmentOverridesEnabled
+	updateButtonState(envBtn, environmentOverridesEnabled, "Clear Water & Fog")
+	
+	if not environmentOverridesEnabled then
+		terrain.WaterTransparency = originalWaterTransparency
+		terrain.WaterReflectance = originalWaterReflectance
+		Lighting.FogEnd = originalFogEnd
+		for atmosphere, originalDensity in pairs(originalAtmosphereDensities) do
+			if atmosphere.Parent then
+				atmosphere.Density = originalDensity
+			end
 		end
 	end
 end)
 
-_G.MasterUtilityConnections.WorkspaceDescendantRemoving = Workspace.DescendantRemoving:Connect(function(descendant)
-	potentialTargets[descendant] = nil
-	untrackEntity(descendant)
-end)
-
-_G.MasterUtilityConnections.CharacterAdded = localPlayer.CharacterAdded:Connect(function(char)
-	potentialTargets[char] = nil
-	untrackEntity(char)
-	clearRangeSphere()
+sleepBtn.MouseButton1Click:Connect(function()
+	bypassSleepEnabled = not bypassSleepEnabled
+	updateButtonState(sleepBtn, bypassSleepEnabled, "Bypass Sleep GUI")
 end)
 
 --------------------------------------------------------------------------------
@@ -1116,9 +1104,13 @@ _G.MasterUtilityConnections.RenderStepped = RunService.RenderStepped:Connect(fun
 
 				-- Apply Latency Compensated Offsets
 				if rangeSpherePart then
-					local ping = getPlayerPing()
-					local myVelocity = root.AssemblyLinearVelocity
-					local targetVelocity = closestTargetRoot and closestTargetRoot.AssemblyLinearVelocity or Vector3.new()
+					local ping = getPlayerPing() or 0.05
+					local myVelocity = if root and root:IsA("BasePart") then root.AssemblyLinearVelocity else Vector3.new()
+					local targetVelocity = Vector3.new()
+					
+					if closestTargetRoot and closestTargetRoot:IsA("BasePart") then
+						targetVelocity = closestTargetRoot.AssemblyLinearVelocity
+					end
 
 					local relativeVelocity = myVelocity - targetVelocity
 					local displacementOffset = relativeVelocity * ping
