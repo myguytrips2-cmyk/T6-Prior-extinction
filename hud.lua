@@ -1,1287 +1,2309 @@
---[[
-================================================================================
-                    DEVELOPER AUTO-EXECUTION DOCUMENTATION
-================================================================================
+_G.ESP_MaxDistance = _G.ESP_MaxDistance or 500
+_G.ToggleESP = _G.ToggleESP or false
+_G.ESP_ShowPlayerName = _G.ESP_ShowPlayerName == nil and true or _G.ESP_ShowPlayerName
+_G.ESP_ShowDinoName = _G.ESP_ShowDinoName == nil and true or _G.ESP_ShowDinoName
+_G.ESP_ShowGrowthStage = _G.ESP_ShowGrowthStage == nil and true or _G.ESP_ShowGrowthStage
+_G.ESP_ShowDistance = _G.ESP_ShowDistance == nil and true or _G.ESP_ShowDistance
+_G.ToggleAutowalk = _G.ToggleAutowalk or false
+_G.ToggleAutogrow = _G.ToggleAutogrow or false
+_G.AutowalkTarget = _G.AutowalkTarget or nil
 
-For administrative testing, accessibility analysis, or client-side debugging across 
-multiple sessions, this script can be configured to load automatically on startup.
-
-HOW TO CONFIGURE AUTO-EXECUTION:
-1. Locate the installation directory of your client-side execution or debugging software.
-2. Find the folder named 'autoexec' or 'auto-execute' (typically located in the workspace 
-   or root directory of your client-side software).
-3. Save this entire script as a text file (e.g., 'MasterUtility.lua') inside that folder.
-4. When saved in the auto-execute folder, the software will automatically execute this 
-   script the exact millisecond the client successfully teleports into a new game 
-   instance (such as when using the '!rejoin' command). This ensures persistent visual 
-   overrides and UI tracking without requiring manual execution after a server hop.
-
-LIFECYCLE PROTECTION:
-This script contains duplicate execution protection. If the script is re-run in the 
-same session, it will automatically find, disconnect, and clean up any old visual elements 
-and background loops before starting, preventing memory leaks or duplicate rendering lag.
-================================================================================
-]]
-
---!strict
+local CoreGui = game:GetService("CoreGui")
 local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
-local TeleportService = game:GetService("TeleportService")
-local Workspace = game:GetService("Workspace")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
+local PathfindingService = game:GetService("PathfindingService")
+local VirtualUser = game:GetService("VirtualUser")
 
-local localPlayer = Players.LocalPlayer
-local playerGui = localPlayer:WaitForChild("PlayerGui")
-local terrain = Workspace:WaitForChild("Terrain")
+pcall(function()
+    VirtualUser:CaptureController()
+end)
 
---------------------------------------------------------------------------------
--- GLOBAL STATE FLAGS, PERSISTENT ARRAYS & CONFIGURATION (GLOBAL SCOPE)
---------------------------------------------------------------------------------
--- Core Functional Toggle Flags
-local trackingEnabled = true
-local environmentOverridesEnabled = true
-local bypassSleepEnabled = true
-local fullbrightActive = false
-local packDensityActive = true
-local carcassScannerActive = true
-local rangeFinderActive = true
-local rejoinCommandEnabled = true
+local UI_NAME = "DarkCyberUI_Overlay"
 
--- Whitelist Registry (Declared Globally at the very top of the script)
-local WhitelistedTable = {}
-
--- Proximity Alert Debounce Registry (Tracks active alert tier level: 0 to 3)
-local triggeredAlerts: {[Model]: number} = {}
-
--- Biting Range Finder Configuration
-local BASE_ATTACK_RANGE = 8 
-local rangeSpherePart: Part? = nil
-
--- Global Caching and Reference Arrays
-local potentialTargets = {}
-local activeOverlays = {}
-local speciesCache = {}
-local activeCarcassGuis = {}
-local registeredSleepOverlays = {}
-
--- Target Species Tracking Parameters
-local TARGET_ATTRIBUTES = {"Species", "Creature", "DinoType"}
-local TARGET_FOLDERS = {"Configuration", "Stats", "Data", "Identity"}
-local TARGET_VALUE_NAMES = {"Species", "Type", "Name"}
-
--- Target Health Tracking Parameters
-local ATTRIBUTE_HEALTH = "Health"            
-local ATTRIBUTE_MAX_HEALTH = "MaxHealth"      
-local VALUE_OBJ_HEALTH = "HealthValue"        
-local VALUE_OBJ_MAX_HEALTH = "MaxHealthValue"  
-
-local WEIGHT_DATA_KEY = "Weight"             
-local OVERLAY_UI_NAME = "EntityTrackerOverlay"
-local MAX_TRACKING_DISTANCE = 10000
-
---------------------------------------------------------------------------------
--- CACHED ORIGINAL ENVIRONMENTAL SETTINGS
---------------------------------------------------------------------------------
-local originalWaterTransparency = terrain.WaterTransparency
-local originalWaterReflectance = terrain.WaterReflectance
-local originalFogEnd = Lighting.FogEnd
-local originalAtmosphereDensities = {}
-
-local originalGlobalShadows = Lighting.GlobalShadows
-local originalAmbient = Lighting.Ambient
-local originalOutdoorAmbient = Lighting.OutdoorAmbient
-local originalBrightness = Lighting.Brightness
-local originalClockTime = Lighting.ClockTime
-
-for _, child in ipairs(Lighting:GetChildren()) do
-	if child:IsA("Atmosphere") then
-		originalAtmosphereDensities[child] = child.Density
-	end
-end
-
---------------------------------------------------------------------------------
--- DUP_PREVENTION: CLEANUP OF PRIOR SCRIPT RUNS
---------------------------------------------------------------------------------
-local existingUI = playerGui:FindFirstChild("MasterUtilityUI")
+-- 1. Safety Check: Clean up any existing UI instances from previous runs
+local existingUI = CoreGui:FindFirstChild(UI_NAME)
 if existingUI then
-	existingUI:Destroy()
+    existingUI:Destroy()
 end
 
-if _G.MasterUtilityConnections then
-	for connectionName, connection in pairs(_G.MasterUtilityConnections) do
-		if typeof(connection) == "RBXScriptConnection" and connection.Connected then
-			connection:Disconnect()
-		end
-	end
+-- Retrieve the local player safely to prevent loading delays
+local localPlayer = Players.LocalPlayer
+if not localPlayer then
+    Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+    localPlayer = Players.LocalPlayer
 end
-_G.MasterUtilityConnections = {}
 
--- Safely purge any residual range-finder parts left over from previous runs
-local function clearRangeSphereGlobal()
-	local oldSphere = Workspace:FindFirstChild("BiteRangeIndicator")
-	if oldSphere then oldSphere:Destroy() end
-end
-clearRangeSphereGlobal()
+local displayName = localPlayer and localPlayer.DisplayName or "User"
+local userId = localPlayer and localPlayer.UserId or 0
+local avatarUrl = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(userId) .. "&w=150&h=150"
 
---------------------------------------------------------------------------------
--- GRAPHICAL INTERFACE SETUP (Programmatic Creation)
---------------------------------------------------------------------------------
+-- 2. Root Container Setup
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "MasterUtilityUI"
+screenGui.Name = UI_NAME
 screenGui.ResetOnSpawn = false
-screenGui.Parent = playerGui
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = CoreGui
 
+-- Styling Constants
+local BG_GRADIENT_START = Color3.fromRGB(20, 10, 30) -- Midnight plum-purple
+local BG_GRADIENT_END = Color3.fromRGB(15, 15, 15)   -- Deep Black
+local ACCENT_COLOR = Color3.fromRGB(140, 0, 255)
+local TEXT_COLOR = Color3.fromRGB(140, 0, 255)
+local LIGHT_TEXT = Color3.fromRGB(180, 180, 180)
+local PANEL_BG = Color3.fromRGB(10, 10, 10)
+local FONT_FAMILY = Enum.Font.Gotham -- Softer, cleaner typography
+
+-- Enhanced Sidebar Button Constants
+local BUTTON_BG = Color3.fromRGB(30, 20, 45)         -- Deep purple-gray translucent tint
+local BUTTON_BG_TRANSPARENCY = 0.5                  -- Subtle translucency for visual layering
+local BUTTON_TEXT_COLOR = Color3.fromRGB(180, 80, 255) -- Highly vibrant purple text for contrast
+
+-- Global Configuration State Store (ESP Configuration Settings Included)
+local uiState = {
+    toggles = {
+        ["Clear Water"] = false,
+        ["Clear Sleep"] = false,
+        ["ESP Active"] = _G.ToggleESP,
+        ["Show Player Names"] = _G.ESP_ShowPlayerName,
+        ["Show Dino Species"] = _G.ESP_ShowDinoName,
+        ["Show Growth Stage"] = _G.ESP_ShowGrowthStage,
+        ["Show Distance"] = _G.ESP_ShowDistance,
+        ["Autowalk Active"] = _G.ToggleAutowalk,
+        ["Autogrow Active"] = _G.ToggleAutogrow,
+    },
+    sliders = {
+        ["Smoothing Range Vector"] = 35,
+        ["Draw Render Distance Limit"] = 75,
+    },
+    keybind = "RightShift"
+}
+
+-- Registry to update UI components programmatically upon configuration load
+local toggleRegistry = {}
+local sliderRegistry = {}
+local keybindUpdateRegistry = nil
+
+-- Keybind State Variable (Default: RightShift)
+local currentKeybind = Enum.KeyCode.RightShift
+
+-- Main Window Frame
 local mainFrame = Instance.new("Frame")
-mainFrame.Name = "MainPanel"
-mainFrame.Size = UDim2.new(0, 240, 0, 280)
-mainFrame.Position = UDim2.new(0.05, 0, 0.2, 0)
-mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+mainFrame.Name = "MainFrame"
+mainFrame.Size = UDim2.new(0, 680, 0, 420)
+mainFrame.Position = UDim2.new(0.5, -340, 0.5, -210)
+mainFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+-- Frame Visibility Adjustments: Set entirely transparent during intro phase
+mainFrame.BackgroundTransparency = 1
 mainFrame.BorderSizePixel = 0
 mainFrame.Active = true
+mainFrame.Draggable = true -- Allows relocating the frame on-screen for review
 mainFrame.Parent = screenGui
 
-local panelCorner = Instance.new("UICorner")
-panelCorner.CornerRadius = UDim.new(0, 8)
-panelCorner.Parent = mainFrame
+-- Rounded corners for Main Frame
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 8)
+mainCorner.Parent = mainFrame
 
--- Header Bar (Handles Dragging)
+-- Ambient Gradient Background (Midnight dark plum-purple to solid deep black)
+local mainGradient = Instance.new("UIGradient")
+mainGradient.Color = ColorSequence.new(BG_GRADIENT_START, BG_GRADIENT_END)
+mainGradient.Rotation = 90
+mainGradient.Parent = mainFrame
+
+-- Outer frame border (Vibrant Purple UIStroke, initially disabled during intro)
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = ACCENT_COLOR
+mainStroke.Thickness = 1.5
+mainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+mainStroke.Enabled = false
+mainStroke.Parent = mainFrame
+
+-- Window Header Frame (Initially invisible during intro phase)
 local headerFrame = Instance.new("Frame")
 headerFrame.Name = "Header"
-headerFrame.Size = UDim2.new(1, 0, 0, 35)
+headerFrame.Size = UDim2.new(1, 0, 0, 40)
 headerFrame.BackgroundTransparency = 1
+headerFrame.Visible = false
 headerFrame.Parent = mainFrame
 
+-- Top Branding Header Title (Exactly "T6 Hub")
 local titleLabel = Instance.new("TextLabel")
-titleLabel.Size = UDim2.new(1, -40, 1, 0)
-titleLabel.Position = UDim2.new(0, 10, 0, 0)
+titleLabel.Name = "TitleLabel"
+titleLabel.Size = UDim2.new(1, -120, 1, 0)
+titleLabel.Position = UDim2.new(0, 15, 0, 0)
 titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "Master Utility Panel"
-titleLabel.TextColor3 = Color3.fromRGB(240, 240, 240)
-titleLabel.TextSize = 14
-titleLabel.Font = Enum.Font.SourceSansBold
+titleLabel.Text = "T6 Hub"
+titleLabel.TextColor3 = TEXT_COLOR
+titleLabel.TextSize = 13
+titleLabel.Font = Enum.Font.GothamBold
 titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 titleLabel.Parent = headerFrame
 
-local minimizeButton = Instance.new("TextButton")
-minimizeButton.Size = UDim2.new(0, 25, 0, 25)
-minimizeButton.Position = UDim2.new(1, -30, 0, 5)
-minimizeButton.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-minimizeButton.Text = "-"
-minimizeButton.TextColor3 = Color3.fromRGB(240, 240, 240)
-minimizeButton.TextSize = 14
-minimizeButton.Font = Enum.Font.SourceSansBold
-minimizeButton.Parent = headerFrame
+-- Close Button (Updated to toggle visibility state non-destructively)
+local closeButton = Instance.new("TextButton")
+closeButton.Name = "CloseButton"
+closeButton.Size = UDim2.new(0, 30, 0, 30)
+closeButton.Position = UDim2.new(1, -40, 0.5, -15)
+closeButton.BackgroundColor3 = BUTTON_BG
+closeButton.BackgroundTransparency = BUTTON_BG_TRANSPARENCY
+closeButton.Text = "X"
+closeButton.TextColor3 = TEXT_COLOR
+closeButton.TextSize = 12
+closeButton.Font = FONT_FAMILY
+closeButton.Parent = headerFrame
 
-local minButtonCorner = Instance.new("UICorner")
-minButtonCorner.CornerRadius = UDim.new(0, 4)
-minButtonCorner.Parent = minimizeButton
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 6)
+closeCorner.Parent = closeButton
 
--- Button List Container (Collapsible ScrollingFrame)
-local scrollFrame = Instance.new("ScrollingFrame")
-scrollFrame.Name = "Container"
-scrollFrame.Size = UDim2.new(1, 0, 1, -35)
-scrollFrame.Position = UDim2.new(0, 0, 0, 35)
-scrollFrame.BackgroundTransparency = 1
-scrollFrame.BorderSizePixel = 0
-scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 380) -- Updated dynamically via Whitelist toggle state
-scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 80)
-scrollFrame.ScrollBarThickness = 5
-scrollFrame.Parent = mainFrame
+local closeStroke = Instance.new("UIStroke")
+closeStroke.Color = ACCENT_COLOR
+closeStroke.Thickness = 1
+closeStroke.Parent = closeButton
 
-local listLayout = Instance.new("UIListLayout")
-listLayout.Padding = UDim.new(0, 6)
-listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-listLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-listLayout.Parent = scrollFrame
-
--- Notification Feed Container (Anchored strictly to Bottom-Right corner)
-local notificationContainer = Instance.new("Frame")
-notificationContainer.Name = "NotificationFeed"
-notificationContainer.Size = UDim2.new(0, 320, 0, 300)
-notificationContainer.Position = UDim2.new(1, -330, 1, -310)
-notificationContainer.BackgroundTransparency = 1
-notificationContainer.BorderSizePixel = 0
-notificationContainer.Parent = screenGui
-
-local notifListLayout = Instance.new("UIListLayout")
-notifListLayout.Padding = UDim.new(0, 5)
-notifListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
-notifListLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
-notifListLayout.Parent = notificationContainer
-
-local function createToggleButton(name: string, defaultText: string, order: number): TextButton
-	local button = Instance.new("TextButton")
-	button.Name = name
-	button.Size = UDim2.new(1, -20, 0, 32)
-	button.BackgroundColor3 = Color3.fromRGB(150, 0, 0) -- Muted dark Red (Default OFF state)
-	button.Text = defaultText .. " (OFF)"
-	button.TextColor3 = Color3.fromRGB(255, 255, 255)
-	button.TextSize = 12
-	button.Font = Enum.Font.SourceSansBold
-	button.LayoutOrder = order
-	button.Parent = scrollFrame
-
-	local btnCorner = Instance.new("UICorner")
-	btnCorner.CornerRadius = UDim.new(0, 6)
-	btnCorner.Parent = button
-
-	return button
-end
-
--- 1. BUTTON TEXT LABEL MAPPING
-local trackingBtn = createToggleButton("ToggleTracking", "X-Ray Tracking", 1)
-local whitelistBtn = createToggleButton("ToggleWhitelistMenu", "Radar Whitelist Manager", 2)
-local packBtn = createToggleButton("TogglePack", "Pack Density Monitor", 3)
-local carcassBtn = createToggleButton("ToggleCarcass", "Carcass Analytics", 4)
-local rangeBtn = createToggleButton("ToggleRange", "Bite Range Finder", 5)
-local fullbrightBtn = createToggleButton("ToggleFullbright", "Fullbright", 6)
-local envBtn = createToggleButton("ToggleEnv", "Clear Water & Fog", 7)
-local sleepBtn = createToggleButton("ToggleSleep", "Bypass Sleep GUI", 8)
-
--- Pack Spacing HUD Label (Positions directly below button layout)
-local packSpacingHUD = Instance.new("TextLabel")
-packSpacingHUD.Name = "PackSpacingHUD"
-packSpacingHUD.Size = UDim2.new(1, -20, 0, 20)
-packSpacingHUD.BackgroundTransparency = 1
-packSpacingHUD.Text = "Pack Density: Off"
-packSpacingHUD.TextColor3 = Color3.fromRGB(150, 150, 150)
-packSpacingHUD.TextSize = 11
-packSpacingHUD.Font = Enum.Font.SourceSansBold
-packSpacingHUD.LayoutOrder = 10
-packSpacingHUD.Parent = scrollFrame
-
--- High-Impact Center-Screen Warning Label (Flashes when pack thresholds are breached)
-local centerWarning = Instance.new("TextLabel")
-centerWarning.Name = "CenterWarningHUD"
-centerWarning.Size = UDim2.new(1, 0, 0, 50)
-centerWarning.Position = UDim2.new(0, 0, 0.35, 0)
-centerWarning.BackgroundTransparency = 1
-centerWarning.Text = "WARNING: High Pack Density - Debuff Imminent"
-centerWarning.TextColor3 = Color3.fromRGB(220, 0, 0)
-centerWarning.TextSize = 20
-centerWarning.Font = Enum.Font.SourceSansBold
-centerWarning.Visible = false
-centerWarning.Parent = screenGui
-
---------------------------------------------------------------------------------
--- SUBMENU: RADAR WHITELIST MANAGER
---------------------------------------------------------------------------------
-local whitelistSectionLabel = Instance.new("TextLabel")
-whitelistSectionLabel.Size = UDim2.new(1, -20, 0, 25)
-whitelistSectionLabel.BackgroundTransparency = 1
-whitelistSectionLabel.Text = "=== RADAR WHITELIST MANAGER ==="
-whitelistSectionLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
-whitelistSectionLabel.TextSize = 10
-whitelistSectionLabel.Font = Enum.Font.SourceSansBold
-whitelistSectionLabel.LayoutOrder = 12
-whitelistSectionLabel.Parent = scrollFrame
-
-local inputContainer = Instance.new("Frame")
-inputContainer.Size = UDim2.new(1, -20, 0, 35)
-inputContainer.BackgroundTransparency = 1
-inputContainer.LayoutOrder = 13
-inputContainer.Parent = scrollFrame
-
-local whitelistInput = Instance.new("TextBox")
-whitelistInput.Size = UDim2.new(0.65, -5, 1, 0)
-whitelistInput.Position = UDim2.new(0, 0, 0, 0)
-whitelistInput.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-whitelistInput.TextColor3 = Color3.fromRGB(240, 240, 240)
-whitelistInput.PlaceholderText = "Enter Username/Display..."
-whitelistInput.Text = ""
-whitelistInput.TextSize = 11
-whitelistInput.Font = Enum.Font.SourceSans
-whitelistInput.Parent = inputContainer
-
-local inputCorner = Instance.new("UICorner")
-inputCorner.CornerRadius = UDim.new(0, 4)
-inputCorner.Parent = whitelistInput
-
-local addWhitelistBtn = Instance.new("TextButton")
-addWhitelistBtn.Size = UDim2.new(0.35, 0, 1, 0)
-addWhitelistBtn.Position = UDim2.new(0.65, 5, 0, 0)
-addWhitelistBtn.BackgroundColor3 = Color3.fromRGB(46, 117, 89)
-addWhitelistBtn.Text = "Add"
-addWhitelistBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-addWhitelistBtn.TextSize = 12
-addWhitelistBtn.Font = Enum.Font.SourceSansBold
-addWhitelistBtn.Parent = inputContainer
-
-local addCorner = Instance.new("UICorner")
-addCorner.CornerRadius = UDim.new(0, 4)
-addCorner.Parent = addWhitelistBtn
-
-local whitelistScroll = Instance.new("ScrollingFrame")
-whitelistScroll.Size = UDim2.new(1, -20, 0, 80)
-whitelistScroll.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-whitelistScroll.BorderSizePixel = 0
-whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-whitelistScroll.ScrollBarThickness = 4
-whitelistScroll.LayoutOrder = 14
-whitelistScroll.Parent = scrollFrame
-
-local scrollCorner = Instance.new("UICorner")
-scrollCorner.CornerRadius = UDim.new(0, 4)
-scrollCorner.Parent = whitelistScroll
-
-local listLayoutScroll = Instance.new("UIListLayout")
-listLayoutScroll.Padding = UDim.new(0, 4)
-listLayoutScroll.HorizontalAlignment = Enum.HorizontalAlignment.Center
-listLayoutScroll.Parent = whitelistScroll
-
-local autoFillBtn = Instance.new("TextButton")
-autoFillBtn.Name = "AutoFillPack"
-autoFillBtn.Size = UDim2.new(1, -20, 0, 30)
-autoFillBtn.BackgroundColor3 = Color3.fromRGB(45, 65, 95)
-autoFillBtn.Text = "Auto-Fill Pack"
-autoFillBtn.TextColor3 = Color3.fromRGB(240, 240, 240)
-autoFillBtn.TextSize = 12
-autoFillBtn.Font = Enum.Font.SourceSansBold
-autoFillBtn.LayoutOrder = 15
-autoFillBtn.Parent = scrollFrame
-
-local autoCorner = Instance.new("UICorner")
-autoCorner.CornerRadius = UDim.new(0, 4)
-autoCorner.Parent = autoFillBtn
-
---------------------------------------------------------------------------------
--- DRAG MECHANICS DESIGN
---------------------------------------------------------------------------------
-local dragging, dragInput, dragStart, startPos
-
-headerFrame.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		dragging = true
-		dragStart = input.Position
-		startPos = mainFrame.Position
-
-		input.Changed:Connect(function()
-			if input.UserInputState == Enum.UserInputState.End then
-				dragging = false
-			end
-		end)
-	end
+closeButton.MouseButton1Click:Connect(function()
+    screenGui.Enabled = false -- Minimizes the interface without destroying state
 end)
 
-headerFrame.InputChanged:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-		dragInput = input
-	end
-end)
+-- Horizontal Divider Line (Initially invisible)
+local horizontalDivider = Instance.new("Frame")
+horizontalDivider.Name = "HorizontalDivider"
+horizontalDivider.Size = UDim2.new(1, -30, 0, 1)
+horizontalDivider.Position = UDim2.new(0, 15, 0, 42)
+horizontalDivider.BackgroundColor3 = ACCENT_COLOR
+horizontalDivider.BorderSizePixel = 0
+horizontalDivider.Visible = false
+horizontalDivider.Parent = mainFrame
 
-_G.MasterUtilityConnections.DragInput = UserInputService.InputChanged:Connect(function(input)
-	if input == dragInput and dragging then
-		local delta = input.Position - dragStart
-		mainFrame.Position = UDim2.new(
-			startPos.X.Scale, startPos.X.Offset + delta.X,
-			startPos.Y.Scale, startPos.Y.Offset + delta.Y
-		)
-	end
-end)
-
---------------------------------------------------------------------------------
--- STABLE SPATIAL UTILITIES, HELPERS & COMPLEMENTS
---------------------------------------------------------------------------------
-local function escapePattern(str: string): string
-	return string.gsub(str, "([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
-end
-
-local function isHashOrNumber(str: string): boolean
-	if tonumber(str) then return true end
-	if string.match(str, "^%x+$") and #str >= 8 then return true end
-	if string.match(str, "%-%x+%-%x+%-%x+") then return true end
-	return false
-end
-
-local function isValidSpeciesCandidate(val: string, modelName: string): boolean
-	if type(val) ~= "string" or val == "" then return false end
-	local valLower = string.lower(val)
-	if valLower == string.lower(modelName) then return false end
-	for _, player in ipairs(Players:GetPlayers()) do
-		if valLower == string.lower(player.Name) or valLower == string.lower(player.DisplayName) then
-			return false
-		end
-	end
-	if isHashOrNumber(val) then return false end
-	if string.find(valLower, "loading") or string.find(valLower, "level") then return false end
-	return true
-end
-
-local function cleanTextLabelString(rawText: string): string?
-	local cleaned = rawText
-	for _, player in ipairs(Players:GetPlayers()) do
-		cleaned = string.gsub(cleaned, escapePattern(player.Name), "")
-		cleaned = string.gsub(cleaned, escapePattern(player.DisplayName), "")
-	end
-	cleaned = string.gsub(cleaned, "%b[]", "")
-	cleaned = string.gsub(cleaned, "%b()", "")
-	cleaned = string.gsub(cleaned, "[%-%:%|%s]+", " ")
-	cleaned = string.gsub(cleaned, "^%s*(.-)%s*$", "%1")
-	if cleaned ~= "" and #cleaned > 1 and not string.find(string.lower(cleaned), "level") then
-		return cleaned
-	end
-	return nil
-end
-
-local function getPlayerDisplayName(model: Model): string
-	local player = Players:FindFirstChild(model.Name)
-	if player and player:IsA("Player") then
-		return player.DisplayName
-	end
-	return "Wild/AI"
-end
-
-local function getDinoSpecies(model: Model): string
-	for _, attrName in ipairs(TARGET_ATTRIBUTES) do
-		local val = model:GetAttribute(attrName)
-		if type(val) == "string" and val ~= "" then return val end
-	end
-
-	for _, folderName in ipairs(TARGET_FOLDERS) do
-		local folder = model:FindFirstChild(folderName)
-		if folder and (folder:IsA("Folder") or folder:IsA("Configuration") or folder:IsA("Model")) then
-			for _, valName in ipairs(TARGET_VALUE_NAMES) do
-				local valueObj = folder:FindFirstChild(valName)
-				if valueObj and valueObj:IsA("ValueBase") then
-					local valStr = tostring(valueObj.Value)
-					if valStr ~= "" then return valStr end
-				end
-			end
-		end
-	end
-
-	for _, desc in ipairs(model:GetDescendants()) do
-		if desc:IsA("TextLabel") then
-			local rawText = desc.Text
-			if rawText ~= "" and not string.find(string.lower(rawText), "loading") then
-				local cleaned = cleanTextLabelString(rawText)
-				if cleaned then return cleaned end
-			end
-		end
-	end
-
-	local humanoid = model:FindFirstChildWhichIsA("Humanoid")
-	if humanoid then return "Dinosaur" end
-	return "Unknown Species"
-end
-
-local function getEntityWeight(model: Model): any?
-	local attributeValue = model:GetAttribute(WEIGHT_DATA_KEY)
-	if attributeValue ~= nil then return attributeValue end
-	
-	local valueInstance = model:FindFirstChild(WEIGHT_DATA_KEY)
-	if valueInstance and valueInstance:IsA("ValueBase") then
-		return valueInstance.Value
-	end
-	return nil
-end
-
-local function getEntityHealth(model: Model): (number, number)
-	local attrHP = model:GetAttribute(ATTRIBUTE_HEALTH)
-	local attrMaxHP = model:GetAttribute(ATTRIBUTE_MAX_HEALTH)
-	if type(attrHP) == "number" then
-		return attrHP, type(attrMaxHP) == "number" and attrMaxHP or 100
-	end
-
-	local hpValObj = model:FindFirstChild(VALUE_OBJ_HEALTH) or model:FindFirstChild("Health")
-	if hpValObj and hpValObj:IsA("ValueBase") then
-		local hp = tonumber(hpValObj.Value) or 0
-		local maxHpValObj = model:FindFirstChild(VALUE_OBJ_MAX_HEALTH) or model:FindFirstChild("MaxHealth")
-		return hp, maxHpValObj and tonumber(maxHpValObj.Value) or 100
-	end
-
-	local humanoid = model:FindFirstChildWhichIsA("Humanoid")
-	if humanoid then return humanoid.Health, humanoid.MaxHealth end
-	return 0, 100
-end
-
-local function getEntityPosition(model: Model): Vector3?
-	local success, position = pcall(function()
-		local part = model.PrimaryPart 
-			or model:FindFirstChild("HumanoidRootPart") 
-			or model:FindFirstChildWhichIsA("BasePart")
-		if part then return part.Position end
-		return nil
-	end)
-	return success and position or nil
-end
-
-local function getLocalPlayerPosition(): Vector3?
-	local char = localPlayer.Character
-	if not char then return nil end
-	local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
-	return root and root.Position or nil
-end
-
-local function untrackEntity(model: Model)
-	local data = activeOverlays[model]
-	if data then
-		if data.Gui then data.Gui:Destroy() end
-		activeOverlays[model] = nil
-	end
-	speciesCache[model] = nil
-	triggeredAlerts[model] = nil
-end
-
-local function trackEntity(model: Model, adornee: BasePart)
-	if not model or not adornee then return end
-	if activeOverlays[model] then return end
-
-	local safeOverlayName = if typeof(OVERLAY_UI_NAME) == "string" then OVERLAY_UI_NAME else "EntityTrackerOverlay"
-
-	local billboardGui = Instance.new("BillboardGui")
-	billboardGui.Name = safeOverlayName
-	billboardGui.Size = UDim2.new(0, 240, 0, 85)
-	billboardGui.StudsOffset = Vector3.new(0, 4, 0)
-	billboardGui.ResetOnSpawn = false
-	billboardGui.AlwaysOnTop = true 
-	billboardGui.MaxDistance = MAX_TRACKING_DISTANCE
-	billboardGui.Adornee = adornee
-
-	local textLabel = Instance.new("TextLabel")
-	textLabel.Size = UDim2.new(1, 0, 1, 0)
-	textLabel.BackgroundTransparency = 1
-	textLabel.TextColor3 = Color3.fromRGB(240, 240, 240)
-	textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-	textLabel.TextStrokeTransparency = 0.2
-	textLabel.TextSize = 13
-	textLabel.Font = Enum.Font.SourceSansBold
-	textLabel.Text = "Retrieving Data..."
-	textLabel.Parent = billboardGui
-
-	billboardGui.Parent = playerGui
-
-	activeOverlays[model] = {
-		Gui = billboardGui,
-		Label = textLabel,
-		Adornee = adornee
-	}
-end
-
--- Safely and aggressively registers models on workspace spawn
-local function evaluateModel(instance: Instance)
-	if instance:IsA("Model") then
-		if localPlayer.Character and instance == localPlayer.Character then return end
-		if instance == Workspace then return end
-		if instance.Name == "Camera" or instance:IsA("Status") then return end
-		
-		task.defer(function()
-			if not instance.Parent then return end
-			potentialTargets[instance] = true
-		end)
-	end
-end
-
---------------------------------------------------------------------------------
--- NATIVE JAW REACH (BITE INDICATOR) INSTANTIATION HELPERS
---------------------------------------------------------------------------------
-local function clearRangeSphere()
-	if rangeSpherePart then
-		rangeSpherePart:Destroy()
-		rangeSpherePart = nil
-	end
-end
-
-local function createRangeSphere(attachPart: BasePart)
-	clearRangeSphere()
-	
-	local sphere = Instance.new("Part")
-	sphere.Name = "BiteRangeIndicator"
-	sphere.Shape = Enum.PartType.Ball
-	sphere.Size = Vector3.new(BASE_ATTACK_RANGE * 2, BASE_ATTACK_RANGE * 2, BASE_ATTACK_RANGE * 2)
-	sphere.Material = Enum.Material.ForceField
-	sphere.Color = Color3.fromRGB(150, 0, 0)
-	sphere.Transparency = 0.6
-	sphere.CanCollide = false
-	sphere.CanTouch = false
-	sphere.CanQuery = false
-	sphere.CastShadow = false
-	sphere.Anchored = true -- manual CFrame updates in main RenderStepped loop
-	
-	sphere.CFrame = attachPart.CFrame
-	sphere.Parent = Workspace
-
-	rangeSpherePart = sphere
-end
 
 -- ============================================================================
--- HOISTED METRIC RETRIEVAL: SAFE LATENCY OVERRIDE (CORRECTED)
--- Fully declared at the top level of the script to prevent nil-calling crashes.
+-- INTERNAL LAYOUT SPLIT: LEFT SIDEBAR & RIGHT CONTENT CANVAS
 -- ============================================================================
-local function getPlayerPing(): number
-	local defaultPing = 0.05 -- 50ms baseline default fallback (seconds)
-	
-	local success, result = pcall(function()
-		local statsService = game:GetService("Stats")
-		local network = statsService:FindFirstChild("Network")
-		local serverStats = network and network:FindFirstChild("ServerStatsItem")
-		local pingItem = serverStats and serverStats:FindFirstChild("Ping")
-		
-		if pingItem then
-			-- Execute GetValue() inside a guarded check
-			local val = pingItem:GetValue()
-			if typeof(val) == "number" then
-				return val / 1000 -- Convert milliseconds to seconds
-			end
-		end
-		return defaultPing
-	end)
-	
-	if success and typeof(result) == "number" then
-		return result
-	end
-	
-	return defaultPing
+
+-- Left Navigation Sidebar (Initially invisible)
+local sidebar = Instance.new("Frame")
+sidebar.Name = "NavigationSidebar"
+sidebar.Size = UDim2.new(0, 180, 1, -65)
+sidebar.Position = UDim2.new(0, 15, 0, 52)
+sidebar.BackgroundTransparency = 1
+sidebar.Visible = false
+sidebar.Parent = mainFrame
+
+local sidebarLayout = Instance.new("UIListLayout")
+sidebarLayout.Padding = UDim.new(0, 8)
+sidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+sidebarLayout.Parent = sidebar
+
+-- Vertical Divider Line between Sidebar and Content Area (Initially invisible)
+local verticalDivider = Instance.new("Frame")
+verticalDivider.Name = "VerticalDivider"
+verticalDivider.Size = UDim2.new(0, 1, 1, -65)
+verticalDivider.Position = UDim2.new(0, 205, 0, 52)
+verticalDivider.BackgroundColor3 = Color3.fromRGB(45, 10, 80)
+verticalDivider.BorderSizePixel = 0
+verticalDivider.Visible = false
+verticalDivider.Parent = mainFrame
+
+-- Right Content Page Container (Initially invisible)
+local container = Instance.new("Frame")
+container.Name = "ContentContainer"
+container.Size = UDim2.new(1, -230, 1, -65)
+container.Position = UDim2.new(0, 215, 0, 52)
+container.BackgroundTransparency = 1
+container.Visible = false
+container.Parent = mainFrame
+
+
+-- ============================================================================
+-- SELECTION MECHANIC & TEMPLATE SETUP
+-- ============================================================================
+
+local highlightBox = Instance.new("Frame")
+highlightBox.Name = "HighlightBox"
+highlightBox.Size = UDim2.new(1, 0, 1, 0)
+highlightBox.BackgroundTransparency = 1
+highlightBox.ZIndex = 3 -- Position above backgrounds to make active state highly distinct
+highlightBox.Visible = false
+
+local highlightCorner = Instance.new("UICorner")
+highlightCorner.CornerRadius = UDim.new(0, 6)
+highlightCorner.Parent = highlightBox
+
+local highlightStroke = Instance.new("UIStroke")
+highlightStroke.Color = ACCENT_COLOR
+highlightStroke.Thickness = 1.5
+highlightStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+highlightStroke.Parent = highlightBox
+
+
+-- ============================================================================
+-- REUSABLE CONTROL COMPONENT GENERATORS (Toggles & Sliders)
+-- ============================================================================
+
+local function createToggleComponent(parent, labelText, onToggleChanged)
+    local toggleFrame = Instance.new("Frame")
+    toggleFrame.Name = labelText .. "Toggle"
+    toggleFrame.Size = UDim2.new(1, 0, 0, 40)
+    toggleFrame.BackgroundTransparency = 1
+    toggleFrame.Parent = parent
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -60, 1, 0)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = LIGHT_TEXT
+    label.TextSize = 13
+    label.Font = FONT_FAMILY
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.Parent = toggleFrame
+
+    local switch = Instance.new("Frame")
+    switch.Size = UDim2.new(0, 42, 0, 22)
+    switch.Position = UDim2.new(1, -45, 0.5, -11)
+    switch.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+    switch.Parent = toggleFrame
+
+    local switchCorner = Instance.new("UICorner")
+    switchCorner.CornerRadius = UDim.new(1, 0)
+    switchCorner.Parent = switch
+
+    local switchStroke = Instance.new("UIStroke")
+    switchStroke.Color = Color3.fromRGB(60, 60, 60)
+    switchStroke.Thickness = 1
+    switchStroke.Parent = switch
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = UDim2.new(0, 3, 0.5, -8)
+    knob.BackgroundColor3 = Color3.fromRGB(240, 240, 240)
+    knob.Parent = switch
+
+    local knobCorner = Instance.new("UICorner")
+    knobCorner.CornerRadius = UDim.new(1, 0)
+    knobCorner.Parent = knob
+
+    -- Set initial state from state store
+    local isActive = uiState.toggles[labelText] or false
+    if isActive then
+        knob.Position = UDim2.new(1, -19, 0.5, -8)
+        switch.BackgroundColor3 = ACCENT_COLOR
+    end
+
+    -- Visual update function to bind to state store changes
+    local function updateVisualState(newState)
+        isActive = newState
+        local targetPos = isActive and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+        local targetColor = isActive and ACCENT_COLOR or Color3.fromRGB(45, 45, 45)
+
+        TweenService:Create(knob, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = targetPos}):Play()
+        TweenService:Create(switch, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundColor3 = targetColor}):Play()
+    end
+
+    toggleRegistry[labelText] = updateVisualState
+
+    switch.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isActive = not isActive
+            uiState.toggles[labelText] = isActive
+            updateVisualState(isActive)
+            if onToggleChanged then
+                onToggleChanged(isActive)
+            end
+        end
+    end)
 end
 
---------------------------------------------------------------------------------
--- ACTIVE PACK MANAGEMENT & AUTO-FILL PACK LOGIC
---------------------------------------------------------------------------------
-local function isAlliedPackMember(otherPlayer: Player): boolean
-	if otherPlayer == localPlayer then return false end
+local function createSliderComponent(parent, labelText, defaultValue)
+    local sliderFrame = Instance.new("Frame")
+    sliderFrame.Name = labelText .. "Slider"
+    sliderFrame.Size = UDim2.new(1, 0, 0, 50)
+    sliderFrame.BackgroundTransparency = 1
+    sliderFrame.Parent = parent
 
-	-- Species Verification
-	local myChar = localPlayer.Character
-	local otherChar = otherPlayer.Character
-	if myChar and otherChar then
-		local mySpecies = speciesCache[myChar] or getDinoSpecies(myChar)
-		local otherSpecies = speciesCache[otherChar] or getDinoSpecies(otherChar)
-		if mySpecies ~= "Unknown Species" and mySpecies == otherSpecies then
-			return true
-		end
-	end
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -60, 0, 20)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = LIGHT_TEXT
+    label.TextSize = 13
+    label.Font = FONT_FAMILY
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = sliderFrame
 
-	-- Group ID Verification
-	local myParty = localPlayer:GetAttribute("PartyID") or localPlayer:GetAttribute("GroupId") or localPlayer:GetAttribute("Squad")
-	local otherParty = otherPlayer:GetAttribute("PartyID") or otherPlayer:GetAttribute("GroupId") or otherPlayer:GetAttribute("Squad")
-	if myParty and otherParty and myParty == otherParty then
-		return true
-	end
+    local percentLabel = Instance.new("TextLabel")
+    percentLabel.Size = UDim2.new(0, 50, 0, 20)
+    percentLabel.Position = UDim2.new(1, -50, 0, 0)
+    percentLabel.BackgroundTransparency = 1
+    percentLabel.Text = tostring(defaultValue or 50) .. "%"
+    percentLabel.TextColor3 = ACCENT_COLOR
+    percentLabel.TextSize = 13
+    percentLabel.Font = FONT_FAMILY
+    percentLabel.TextXAlignment = Enum.TextXAlignment.Right
+    percentLabel.Parent = sliderFrame
 
-	-- ValueObject Verification
-	local mySquadObj = localPlayer:FindFirstChild("Party") or localPlayer:FindFirstChild("Squad")
-	local otherSquadObj = otherPlayer:FindFirstChild("Party") or otherPlayer:FindFirstChild("Squad")
-	if mySquadObj and otherSquadObj and mySquadObj:IsA("ValueBase") and otherSquadObj:IsA("ValueBase") then
-		if mySquadObj.Value == otherSquadObj.Value and mySquadObj.Value ~= "" then
-			return true
-		end
-	end
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(1, 0, 0, 6)
+    track.Position = UDim2.new(0, 0, 0, 32)
+    track.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    track.BorderSizePixel = 0
+    track.Parent = sliderFrame
 
-	return false
+    local trackCorner = Instance.new("UICorner")
+    trackCorner.CornerRadius = UDim.new(1, 0)
+    trackCorner.Parent = track
+
+    -- Get initial value from state store
+    local value = uiState.sliders[labelText] or defaultValue or 50
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(value/100, 0, 1, 0)
+    fill.BackgroundColor3 = ACCENT_COLOR
+    fill.BorderSizePixel = 0
+    fill.Parent = track
+
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(1, 0)
+    fillCorner.Parent = fill
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(value/100, 0, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.Parent = track
+
+    local knobCorner = Instance.new("UICorner")
+    knobCorner.CornerRadius = UDim.new(1, 0)
+    knobCorner.Parent = knob
+
+    local knobStroke = Instance.new("UIStroke")
+    knobStroke.Color = ACCENT_COLOR
+    knobStroke.Thickness = 1.5
+    knobStroke.Parent = knob
+
+    -- Visual update function to bind to state store changes
+    local function updateVisualState(newValue)
+        value = newValue
+        local relativeX = math.clamp(value / 100, 0, 1)
+        fill.Size = UDim2.new(relativeX, 0, 1, 0)
+        knob.Position = UDim2.new(relativeX, 0, 0.5, 0)
+        percentLabel.Text = tostring(math.round(relativeX * 100)) .. "%"
+    end
+
+    sliderRegistry[labelText] = updateVisualState
+
+    local dragging = false
+    local function updateSlider(input)
+        local relativeX = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        uiState.sliders[labelText] = math.round(relativeX * 100)
+        updateVisualState(uiState.sliders[labelText])
+    end
+
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            updateSlider(input)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            updateSlider(input)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
 end
 
-local function isAlliedPackModel(model: Model): boolean
-	if localPlayer.Character and model == localPlayer.Character then return false end
-	
-	local player = Players:FindFirstChild(model.Name)
-	if player then
-		if isAlliedPackMember(player) then return true end
-	end
-	
-	local myChar = localPlayer.Character
-	if myChar then
-		local mySpecies = speciesCache[myChar] or getDinoSpecies(myChar)
-		local otherSpecies = speciesCache[model] or getDinoSpecies(model)
-		if mySpecies ~= "Unknown Species" and mySpecies == otherSpecies then
-			return true
-		end
-	end
-	
-	return false
+-- Specialized Dynamic Slider Builder for Distance Custom Range Configuration
+local function createDistanceSliderComponent(parent, labelText, minVal, maxVal, defaultValue, onValueChanged)
+    local sliderFrame = Instance.new("Frame")
+    sliderFrame.Name = labelText .. "Slider"
+    sliderFrame.Size = UDim2.new(1, 0, 0, 50)
+    sliderFrame.BackgroundTransparency = 1
+    sliderFrame.Parent = parent
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -60, 0, 20)
+    label.BackgroundTransparency = 1
+    label.Text = labelText
+    label.TextColor3 = LIGHT_TEXT
+    label.TextSize = 13
+    label.Font = FONT_FAMILY
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = sliderFrame
+
+    local valueLabel = Instance.new("TextLabel")
+    valueLabel.Size = UDim2.new(0, 60, 0, 20)
+    valueLabel.Position = UDim2.new(1, -60, 0, 0)
+    valueLabel.BackgroundTransparency = 1
+    valueLabel.Text = tostring(defaultValue) .. "m"
+    valueLabel.TextColor3 = ACCENT_COLOR
+    valueLabel.TextSize = 13
+    valueLabel.Font = FONT_FAMILY
+    valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valueLabel.Parent = sliderFrame
+
+    local track = Instance.new("Frame")
+    track.Name = "SliderTrack"
+    track.Size = UDim2.new(1, 0, 0, 6)
+    track.Position = UDim2.new(0, 0, 0, 32)
+    track.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    track.BorderSizePixel = 0
+    track.Parent = sliderFrame -- FIXED PARENTING BUG: Correctly assigned to sliderFrame instead of self
+
+    local trackCorner = Instance.new("UICorner")
+    trackCorner.CornerRadius = UDim.new(1, 0)
+    trackCorner.Parent = track
+
+    local value = defaultValue
+
+    local fill = Instance.new("Frame")
+    local initialPct = (value - minVal) / (maxVal - minVal)
+    fill.Size = UDim2.new(initialPct, 0, 1, 0)
+    fill.BackgroundColor3 = ACCENT_COLOR
+    fill.BorderSizePixel = 0
+    fill.Parent = track
+
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(1, 0)
+    fillCorner.Parent = fill
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 14, 0, 14)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(initialPct, 0, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    knob.Parent = track
+
+    local knobCorner = Instance.new("UICorner")
+    knobCorner.CornerRadius = UDim.new(1, 0)
+    knobCorner.Parent = knob
+
+    local knobStroke = Instance.new("UIStroke")
+    knobStroke.Color = ACCENT_COLOR
+    knobStroke.Thickness = 1.5
+    knobStroke.Parent = knob
+
+    local function updateVisualState(newValue)
+        value = math.clamp(newValue, minVal, maxVal)
+        local relativeX = (value - minVal) / (maxVal - minVal)
+        fill.Size = UDim2.new(relativeX, 0, 1, 0)
+        knob.Position = UDim2.new(relativeX, 0, 0.5, 0)
+        valueLabel.Text = tostring(math.round(value)) .. "m"
+    end
+
+    local dragging = false
+    local function updateSlider(input)
+        local relativeX = math.clamp((input.Position.X - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        local calculatedValue = minVal + (relativeX * (maxVal - minVal))
+        updateVisualState(calculatedValue)
+        if onValueChanged then
+            onValueChanged(math.round(calculatedValue))
+        end
+    end
+
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            updateSlider(input)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            updateSlider(input)
+        end
+    end)
+
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
 end
 
--- Central Whitelist case-insensitive check utility using safe loops
-local function checkIsWhitelisted(name: string): boolean
-	local nameLower = string.lower(name)
-	for _, whitelistedName in pairs(WhitelistedTable or {}) do
-		if whitelistedName == nameLower then
-			return true
-		end
-	end
-	return false
+
+-- ============================================================================
+-- PERFORMANCE & ENVIRONMENT CONTROL LOGIC (Water & Sleep Removal)
+-- ============================================================================
+
+local clearWaterConnection = nil
+local Terrain = workspace:FindFirstChildOfClass("Terrain")
+local disabledAtmospheres = {}
+
+-- Backup references to original environment parameters
+local originalProps = {
+    WaterTransparency = Terrain and Terrain.WaterTransparency or 1,
+    WaterColor = Terrain and Terrain.WaterColor or Color3.fromRGB(0, 85, 127),
+    WaterWaveSize = Terrain and Terrain.WaterWaveSize or 0.15,
+    WaterWaveSpeed = Terrain and Terrain.WaterWaveSpeed or 10,
+    FogStart = Lighting.FogStart,
+    FogEnd = Lighting.FogEnd
+}
+
+-- 1. "Clear Water" Logic
+local function toggleClearWater(state)
+    if state then
+        if Terrain then
+            originalProps.WaterTransparency = Terrain.WaterTransparency
+            originalProps.WaterColor = Terrain.WaterColor
+            originalProps.WaterWaveSize = Terrain.WaterWaveSize
+            originalProps.WaterWaveSpeed = Terrain.WaterWaveSpeed
+        end
+        originalProps.FogStart = Lighting.FogStart
+        originalProps.FogEnd = Lighting.FogEnd
+
+        clearWaterConnection = RunService.RenderStepped:Connect(function()
+            if Terrain then
+                Terrain.WaterTransparency = 1
+                Terrain.WaterColor = Color3.fromRGB(15, 45, 60)
+                Terrain.WaterWaveSize = 0
+                Terrain.WaterWaveSpeed = 0
+            end
+            Lighting.FogStart = 999999
+            Lighting.FogEnd = 999999
+
+            for _, child in ipairs(Lighting:GetChildren()) do
+                if child:IsA("BlurEffect") or child:IsA("DepthOfFieldEffect") then
+                    child.Enabled = false
+                elseif child:IsA("Atmosphere") then
+                    child.Parent = screenGui
+                    table.insert(disabledAtmospheres, child)
+                end
+            end
+        end)
+    else
+        if clearWaterConnection then
+            clearWaterConnection:Disconnect()
+            clearWaterConnection = nil
+        end
+
+        if Terrain then
+            Terrain.WaterTransparency = originalProps.WaterTransparency
+            Terrain.WaterColor = originalProps.WaterColor
+            Terrain.WaterWaveSize = originalProps.WaterWaveSize
+            Terrain.WaterWaveSpeed = originalProps.WaterWaveSpeed
+        end
+        Lighting.FogStart = originalProps.FogStart
+        Lighting.FogEnd = originalProps.FogEnd
+
+        for _, child in ipairs(Lighting:GetChildren()) do
+            if child:IsA("BlurEffect") or child:IsA("DepthOfFieldEffect") then
+                child.Enabled = true
+            end
+        end
+        for _, atmos in ipairs(disabledAtmospheres) do
+            atmos.Parent = Lighting
+        end
+        table.clear(disabledAtmospheres)
+    end
 end
 
--- Whitelist manual addition framework with search and loose fallback
-local function addPlayerToWhitelist(rawName: string)
-	local cleanName = string.gsub(rawName, "^%s*(.-)%s*$", "%1")
-	if cleanName == "" then return end
+-- 2. "Clear Sleep" Logic
+local sleepConnection = nil
+local hiddenSleepFrames = {}
 
-	local cleanNameLower = string.lower(cleanName)
-	local foundPlayer: Player? = nil
-
-	for _, player in ipairs(Players:GetPlayers()) do
-		if string.lower(player.DisplayName) == cleanNameLower then
-			foundPlayer = player
-			break
-		end
-	end
-
-	local labelName = cleanName
-	
-	if foundPlayer then
-		local usernameLower = string.lower(foundPlayer.Name)
-		local displayLower = string.lower(foundPlayer.DisplayName)
-		labelName = foundPlayer.DisplayName
-
-		if not table.find(WhitelistedTable, usernameLower) then
-			table.insert(WhitelistedTable, usernameLower)
-		end
-		if not table.find(WhitelistedTable, displayLower) then
-			table.insert(WhitelistedTable, displayLower)
-		end
-
-		local entryButton = Instance.new("TextButton")
-		entryButton.Size = UDim2.new(1, -10, 0, 24)
-		entryButton.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
-		entryButton.Text = labelName .. " [x]"
-		entryButton.TextColor3 = Color3.fromRGB(220, 100, 100)
-		entryButton.TextSize = 11
-		entryButton.Font = Enum.Font.SourceSansBold
-		entryButton.Parent = whitelistScroll
-
-		local entryCorner = Instance.new("UICorner")
-		entryCorner.CornerRadius = UDim.new(0, 4)
-		entryCorner.Parent = entryButton
-
-		whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, listLayoutScroll.AbsoluteContentSize.Y + 10)
-
-		entryButton.MouseButton1Click:Connect(function()
-			local idx1 = table.find(WhitelistedTable, usernameLower)
-			if idx1 then table.remove(WhitelistedTable, idx1) end
-			local idx2 = table.find(WhitelistedTable, displayLower)
-			if idx2 then table.remove(WhitelistedTable, idx2) end
-			
-			entryButton:Destroy()
-			whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, listLayoutScroll.AbsoluteContentSize.Y + 10)
-		end)
-	else
-		if table.find(WhitelistedTable, cleanNameLower) then return end
-		table.insert(WhitelistedTable, cleanNameLower)
-
-		local entryButton = Instance.new("TextButton")
-		entryButton.Size = UDim2.new(1, -10, 0, 24)
-		entryButton.BackgroundColor3 = Color3.fromRGB(55, 55, 55)
-		entryButton.Text = labelName .. " (Raw) [x]"
-		entryButton.TextColor3 = Color3.fromRGB(220, 100, 100)
-		entryButton.TextSize = 11
-		entryButton.Font = Enum.Font.SourceSansBold
-		entryButton.Parent = whitelistScroll
-
-		local entryCorner = Instance.new("UICorner")
-		entryCorner.CornerRadius = UDim.new(0, 4)
-		entryCorner.Parent = entryButton
-
-		whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, listLayoutScroll.AbsoluteContentSize.Y + 10)
-
-		entryButton.MouseButton1Click:Connect(function()
-			local idx = table.find(WhitelistedTable, cleanNameLower)
-			if idx then table.remove(WhitelistedTable, idx) end
-			
-			entryButton:Destroy()
-			whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, listLayoutScroll.AbsoluteContentSize.Y + 10)
-		end)
-	end
+-- Safely inspects frames against scale dimensions and color properties
+local function checkFrame(frame)
+    if frame:IsA("Frame") then
+        local successSize, size = pcall(function() return frame.Size end)
+        local successColor, color = pcall(function() return frame.BackgroundColor3 end)
+        if successSize and successColor then
+            if size.X.Scale >= 1 and size.Y.Scale >= 1 and color.R < 0.1 then
+                hiddenSleepFrames[frame] = true
+                frame.Visible = false
+            end
+        end
+    end
 end
 
---------------------------------------------------------------------------------
--- CARCASS SCANNING UTILITIES
---------------------------------------------------------------------------------
-local function isFoodNode(inst: Instance): boolean
-	local nameLower = string.lower(inst.Name)
-	return string.find(nameLower, "carcass") 
-		or string.find(nameLower, "meat") 
-		or string.find(nameLower, "foodnode") 
-		or string.find(nameLower, "fishpool")
+local function toggleClearSleep(state)
+    if state then
+        -- Initial environmental scan of current UI structures
+        for _, desc in ipairs(localPlayer.PlayerGui:GetDescendants()) do
+            checkFrame(desc)
+        end
+        -- Connect Child added listener to hook newly loaded overlays
+        sleepConnection = localPlayer.PlayerGui.DescendantAdded:Connect(function(desc)
+            checkFrame(desc)
+        end)
+    else
+        if sleepConnection then
+            sleepConnection:Disconnect()
+            sleepConnection = nil
+        end
+        -- Revert visual state visibility parameters cleanly
+        for frame, _ in pairs(hiddenSleepFrames) do
+            pcall(function()
+                if frame and frame.Parent then
+                    frame.Visible = true
+                end
+            end)
+        end
+        table.clear(hiddenSleepFrames)
+    end
 end
 
-local function getCarcassData(inst: Instance): (number, number, boolean)
-	local yield = 100
-	local spoilTime = 300
-	local isRotten = false
 
-	local attrYield = inst:GetAttribute("MeatAmount") or inst:GetAttribute("Nutrition") or inst:GetAttribute("FoodPoints")
-	local attrRot = inst:GetAttribute("RotProgress") or inst:GetAttribute("SpoilTimer") or inst:GetAttribute("Rot")
-	
-	if not attrYield then
-		local valObj = inst:FindFirstChild("FoodValue") or inst:FindFirstChild("Nutrition") or inst:FindFirstChild("Value")
-		if valObj and valObj:IsA("ValueBase") then attrYield = valObj.Value end
-	end
-	if not attrRot then
-		local valObj = inst:FindFirstChild("RotProgress") or inst:FindFirstChild("SpoilTimer") or inst:FindFirstChild("Rot")
-		if valObj and valObj:IsA("ValueBase") then attrRot = valObj.Value end
-	end
+-- ============================================================================
+-- STREAMING-SAFE MULTI-DATA MODULAR PRIOR EXTINCTION ESP (STRICT STATE RULES)
+-- ============================================================================
 
-	yield = tonumber(attrYield) or 100
-	spoilTime = tonumber(attrRot) or 300
+local activeTags = {}
+local espContainer = nil
 
-	local attrIsRotten = inst:GetAttribute("IsRotten")
-	if attrIsRotten ~= nil then
-		isRotten = attrIsRotten
-	else
-		local rotPercent = inst:GetAttribute("RotPercent") or inst:GetAttribute("RotProgress")
-		if rotPercent and tonumber(rotPercent) and tonumber(rotPercent) >= 100 then
-			isRotten = true
-		elseif spoilTime <= 0 then
-			isRotten = true
-		end
-	end
+local BLOCKLIST = {
+    "elbow", "body", "leg", "arm", "tail", "head", "neck", "wing", 
+    "claw", "mesh", "part", "rig", "wild", "npc", "meshmodel", "handle"
+}
 
-	return yield, spoilTime, isRotten
+local PREFERRED_PARTS = {
+    "HumanoidRootPart", "RootPart", "Torso", "LowerTorso", "Spine", "Main"
+}
+
+local TARGET_TAGS = {
+    "PlayerDino", "LiveCreature", "Character", "Dinosaur", "Creature", "Animal", "Player", "Live"
+}
+
+local function getESPContainer()
+    if not espContainer or not espContainer.Parent then
+        espContainer = Instance.new("Folder")
+        espContainer.Name = "PriorExtinction_ESP_Container"
+        espContainer.Parent = CoreGui
+    end
+    return espContainer
 end
 
-local function createCarcassOverlay(item: Instance, adornee: BasePart)
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "CarcassTelemetryUI"
-	billboard.Size = UDim2.new(0, 150, 0, 55)
-	billboard.AlwaysOnTop = true
-	billboard.MaxDistance = 5000
-	billboard.StudsOffset = Vector3.new(0, 3, 0)
-	billboard.Adornee = adornee
-
-	local textLabel = Instance.new("TextLabel")
-	textLabel.Size = UDim2.new(1, 0, 1, 0)
-	textLabel.BackgroundTransparency = 1
-	textLabel.TextColor3 = Color3.fromRGB(255, 165, 0)
-	textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-	textLabel.TextStrokeTransparency = 0.2
-	textLabel.TextSize = 10
-	textLabel.Font = Enum.Font.SourceSansBold
-	textLabel.Text = "Scanning..."
-	textLabel.Parent = billboard
-
-	billboard.Parent = playerGui
-	activeCarcassGuis[item] = billboard
+local function isBlockedPart(partName)
+    local nameLower = partName:lower()
+    for _, blocked in ipairs(BLOCKLIST) do
+        if nameLower:find(blocked) then
+            return true
+        end
+    end
+    return false
 end
 
-local function clearCarcassOverlays()
-	for item, gui in pairs(activeCarcassGuis) do
-		if gui then gui:Destroy() end
-	end
-	table.clear(activeCarcassGuis)
+local function findTargetPart(model)
+    if not model:IsA("Model") then return nil end
+
+    for _, name in ipairs(PREFERRED_PARTS) do
+        local part = model:FindFirstChild(name, true)
+        if part and part:IsA("BasePart") then
+            return part
+        end
+    end
+
+    if model.PrimaryPart then
+        return model.PrimaryPart
+    end
+
+    local descendants = model:GetDescendants()
+    for _, item in ipairs(descendants) do
+        if item:IsA("BasePart") then
+            if not isBlockedPart(item.Name) then
+                return item
+            end
+        end
+    end
+
+    for _, item in ipairs(descendants) do
+        if item:IsA("BasePart") then
+            return item
+        end
+    end
+
+    return nil
 end
 
---------------------------------------------------------------------------------
--- REVISED UI PANEL ASSEMBLY & COMPONENT INTERACTIVE STATE WIRING
---------------------------------------------------------------------------------
--- Helper to update button visual colors and text states
-local function updateButtonState(button: TextButton, state: boolean, text: string)
-	if state then
-		button.BackgroundColor3 = Color3.fromRGB(0, 150, 0) -- Vibrant Green (ON)
-		button.Text = text .. " (ON)"
-	else
-		button.BackgroundColor3 = Color3.fromRGB(150, 0, 0) -- Muted dark Red (OFF)
-		button.Text = text .. " (OFF)"
-	end
+local function extractDetails(model)
+    local species = nil
+    local growth = nil
+
+    species = model:GetAttribute("Species") or model:GetAttribute("Dinosaur") or model:GetAttribute("Type")
+    growth = model:GetAttribute("Growth") or model:GetAttribute("Stage") or model:GetAttribute("GrowthStage") or model:GetAttribute("Age")
+
+    for _, item in ipairs(model:GetDescendants()) do
+        if not species then
+            if item:IsA("StringValue") and (item.Name:lower() == "species" or item.Name:lower() == "dinosaur") then
+                species = item.Value
+            elseif item.Name:lower() == "species" or item.Name:lower() == "dinosaur" then
+                species = item:GetAttribute("Value") or item:GetAttribute("Species")
+            end
+        end
+        if not growth then
+            if item:IsA("StringValue") and (item.Name:lower() == "growth" or item.Name:lower() == "stage" or item.Name:lower() == "age" or item.Name:lower() == "growthstage") then
+                growth = item.Value
+            elseif item:IsA("NumberValue") and item.Name:lower() == "growth" then
+                growth = tostring(math.round(item.Value * 100)) .. "%"
+            elseif item:IsA("StringValue") and item.Name:lower() == "growthstage" then
+                growth = item.Value
+            end
+        end
+    end
+
+    if not species then
+        species = model.Name
+    end
+
+    local growthStr = ""
+    if growth then
+        growthStr = " [" .. tostring(growth) .. "]"
+    end
+
+    return tostring(species), growthStr
 end
 
--- Setup Whitelist Submenu Visibility Toggle Logic
-local function updateSubmenuVisibility(state: boolean)
-	whitelistSectionLabel.Visible = state
-	inputContainer.Visible = state
-	whitelistScroll.Visible = state
-	autoFillBtn.Visible = state
-	
-	-- Dynamically adjust main ScrollingFrame CanvasSize based on visibility states
-	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, state and 540 or 380)
+local function createESPLabel(adornPart, titleText, subtitleText)
+    local containerFolder = getESPContainer()
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "PE_DinoTag"
+    billboard.Size = UDim2.new(0, 200, 0, 60)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 5000
+    billboard.StudsOffset = Vector3.new(0, 4, 0)
+    billboard.Adornee = adornPart
+    billboard.Parent = containerFolder
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = titleText .. "\n" .. subtitleText
+    textLabel.TextColor3 = Color3.fromRGB(160, 32, 240)
+    textLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    textLabel.TextStrokeTransparency = 0
+    textLabel.TextSize = 13
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.RichText = true
+    textLabel.TextYAlignment = Enum.TextYAlignment.Center
+    textLabel.TextXAlignment = Enum.TextXAlignment.Center
+    textLabel.Parent = billboard
+
+    return billboard
 end
 
--- Initializing visual states to their respective runtime configurations
-updateButtonState(trackingBtn, trackingEnabled, "X-Ray Tracking")
-updateButtonState(whitelistBtn, false, "Radar Whitelist Manager") -- Starts closed
-updateButtonState(packBtn, packDensityActive, "Pack Density Monitor")
-updateButtonState(carcassBtn, carcassScannerActive, "Carcass Analytics")
-updateButtonState(rangeBtn, rangeFinderActive, "Bite Range Finder")
-updateButtonState(fullbrightBtn, fullbrightActive, "Fullbright")
-updateButtonState(envBtn, environmentOverridesEnabled, "Clear Water & Fog")
-updateButtonState(sleepBtn, bypassSleepEnabled, "Bypass Sleep GUI")
+local function processModel(model)
+    if activeTags[model] then return end
 
--- Initialize whitelist sub-menu to off on script startup
-updateSubmenuVisibility(false)
+    -- Duplication Check: Verify if an existing BillboardUI is already attached to a part inside this model
+    local containerFolder = getESPContainer()
+    for _, child in ipairs(containerFolder:GetChildren()) do
+        if child:IsA("BillboardGui") and child.Name == "PE_DinoTag" and child.Adornee and child.Adornee:IsDescendantOf(model) then
+            local species, growth = extractDetails(model)
+            local targetPlayer = Players:GetPlayerFromCharacter(model)
+            local title = targetPlayer and targetPlayer.DisplayName or targetPlayer and targetPlayer.Name or "Wild"
+            
+            -- Recycle the existing tag cleanly
+            activeTags[model] = {
+                tag = child,
+                title = title,
+                species = species,
+                growth = growth
+            }
+            return
+        end
+    end
 
--- 2. INTERACTIVE TOGGLE COLORIZATION & EVENT BINDINGS
-trackingBtn.MouseButton1Click:Connect(function()
-	trackingEnabled = not trackingEnabled
-	updateButtonState(trackingBtn, trackingEnabled, "X-Ray Tracking")
-	if not trackingEnabled then
-		for model in pairs(activeOverlays) do
-			untrackEntity(model)
-		end
-	end
-end)
+    -- Complete standard processing if no recycled tag was bound
+    local targetPlayer = Players:GetPlayerFromCharacter(model)
+    local playerDisplayName = targetPlayer and targetPlayer.DisplayName
+    local playerUsername = targetPlayer and targetPlayer.Name
 
-whitelistBtn.MouseButton1Click:Connect(function()
-	local submenuState = not whitelistSectionLabel.Visible
-	updateButtonState(whitelistBtn, submenuState, "Radar Whitelist Manager")
-	updateSubmenuVisibility(submenuState)
-end)
+    local species, growth = extractDetails(model)
+    local title = playerDisplayName or playerUsername or "Wild"
 
-packBtn.MouseButton1Click:Connect(function()
-	packDensityActive = not packDensityActive
-	updateButtonState(packBtn, packDensityActive, "Pack Density Monitor")
-end)
+    local adornPart = findTargetPart(model)
+    if adornPart then
+        local tag = createESPLabel(adornPart, "", "")
+        activeTags[model] = {
+            tag = tag,
+            title = title,
+            species = species,
+            growth = growth
+        }
+    end
+end
 
-carcassBtn.MouseButton1Click:Connect(function()
-	carcassScannerActive = not carcassScannerActive
-	updateButtonState(carcassBtn, carcassScannerActive, "Carcass Analytics")
-	if not carcassScannerActive then
-		clearCarcassOverlays()
-	end
-end)
+local function scanEnvironment()
+    -- 1. Scan Player List Active Characters (Tracing dynamic server parent mappings)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= localPlayer then
+            local char = player.Character
+            if char and char:IsA("Model") then
+                processModel(char)
+            end
+        end
+    end
 
-rangeBtn.MouseButton1Click:Connect(function()
-	rangeFinderActive = not rangeFinderActive
-	updateButtonState(rangeBtn, rangeFinderActive, "Bite Range Finder")
-	if not rangeFinderActive then
-		clearRangeSphere()
-	end
-end)
+    -- 2. CollectionService Sweep
+    for _, tag in ipairs(TARGET_TAGS) do
+        for _, inst in ipairs(CollectionService:GetInstancesByTag(tag)) do
+            if inst:IsA("Model") and inst ~= localPlayer.Character then
+                processModel(inst)
+            end
+        end
+    end
 
-fullbrightBtn.MouseButton1Click:Connect(function()
-	fullbrightActive = not fullbrightActive
-	updateButtonState(fullbrightBtn, fullbrightActive, "Fullbright")
-	
-	if not fullbrightActive then
-		Lighting.GlobalShadows = originalGlobalShadows
-		Lighting.Ambient = originalAmbient
-		Lighting.OutdoorAmbient = originalOutdoorAmbient
-		Lighting.Brightness = originalBrightness
-		Lighting.ClockTime = originalClockTime
-	end
-end)
+    -- 3. Workspace Sweep (Dynamic recursive tracking of wild entities & carcasses)
+    for _, child in ipairs(workspace:GetDescendants()) do
+        if child:IsA("Model") and child ~= localPlayer.Character then
+            local hasBaseParts = false
 
-envBtn.MouseButton1Click:Connect(function()
-	environmentOverridesEnabled = not environmentOverridesEnabled
-	updateButtonState(envBtn, environmentOverridesEnabled, "Clear Water & Fog")
-	
-	if not environmentOverridesEnabled then
-		terrain.WaterTransparency = originalWaterTransparency
-		terrain.WaterReflectance = originalWaterReflectance
-		Lighting.FogEnd = originalFogEnd
-		for atmosphere, originalDensity in pairs(originalAtmosphereDensities) do
-			if atmosphere.Parent then
-				atmosphere.Density = originalDensity
-			end
-		end
-	end
-end)
+            for _, desc in ipairs(child:GetChildren()) do
+                if desc:IsA("BasePart") then
+                    hasBaseParts = true
+                    break
+                end
+            end
 
-sleepBtn.MouseButton1Click:Connect(function()
-	bypassSleepEnabled = not bypassSleepEnabled
-	updateButtonState(sleepBtn, bypassSleepEnabled, "Bypass Sleep GUI")
-end)
+            if not hasBaseParts then
+                for _, desc in ipairs(child:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        hasBaseParts = true
+                        break
+                    end
+                end
+            end
 
---------------------------------------------------------------------------------
--- BACKGROUND SCANNING LOOP (Carcass Evaluation Paced at 1.5 Seconds)
---------------------------------------------------------------------------------
+            if hasBaseParts then
+                local isPlayerChar = Players:GetPlayerFromCharacter(child)
+                local hasHumanoid = child:FindFirstChildOfClass("Humanoid")
+                local hasDinoData = child:GetAttribute("Species") or child:FindFirstChild("Species", true)
+
+                if isPlayerChar or hasHumanoid or hasDinoData then
+                    processModel(child)
+                end
+            end
+        end
+    end
+end
+
+local function handleDynamicUpdates()
+    local localCharacter = localPlayer and localPlayer.Character
+    local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
+    
+    -- Dynamic Reference Origin Tracking (Falls back safely to local camera position if character is missing)
+    local originPos = nil
+    if localRoot then
+        originPos = localRoot.Position
+    else
+        local camera = workspace.CurrentCamera
+        if camera then
+            originPos = camera.CFrame.Position
+        end
+    end
+
+    -- Directly extract current global toggle boolean states
+    local showPlayer = _G.ESP_ShowPlayerName
+    local showDino = _G.ESP_ShowDinoName
+    local showGrowth = _G.ESP_ShowGrowthStage
+    local showDistance = _G.ESP_ShowDistance or _G.ShowDistance or _G.DistanceESP
+    local showTags = showPlayer or showDino or showGrowth or showDistance
+
+    -- Dynamic evaluation of Range configuration at the absolute top of the processing loop
+    local maxDistMeters = _G.ESP_MaxDistance or _G.MaxDistance or _G.ESPRange or 1000
+    local maxDistStuds = maxDistMeters * 2.8
+
+    for model, data in pairs(activeTags) do
+        local tag = data.tag
+        -- Persistent Verification: Verify if model has been deleted, unparented, or culled due to streaming replication
+        if not model or not model.Parent then
+            pcall(function() tag:Destroy() end)
+            activeTags[model] = nil
+        else
+            if not tag:IsA("BillboardGui") then continue end
+            
+            -- Verify Adornee link integrity. Re-find target parts if dynamic replication flashes children properties
+            local adorn = tag.Adornee
+            if not adorn or not adorn.Parent then
+                local newAdorn = findTargetPart(model)
+                if newAdorn then
+                    tag.Adornee = newAdorn
+                    adorn = newAdorn
+                else
+                    pcall(function() tag:Destroy() end)
+                    activeTags[model] = nil
+                    continue
+                end
+            end
+
+            -- Calculate distance from local player reference point
+            local distStuds = 999999
+            if originPos and adorn then
+                distStuds = (originPos - adorn.Position).Magnitude
+            end
+
+            -- Range-Based Culling Filter & Blank Tag Prevention
+            local withinRange = distStuds <= maxDistStuds
+            if not showTags or not withinRange then
+                tag.Enabled = false
+            else
+                tag.Enabled = true
+                local label = tag:FindFirstChildOfClass("TextLabel")
+                if label then
+                    -- Real-Time Assembly of text lines based on exact global parameters (Fresh Local Text String Builder)
+                    local lines = {}
+                    
+                    -- Player Display Name Line
+                    if showPlayer then
+                        table.insert(lines, tostring(data.title))
+                    end
+                    
+                    -- Dino Species Name & Growth Stage Line
+                    local line2Text = ""
+                    if showDino then
+                        line2Text = "[" .. tostring(data.species) .. "]"
+                    end
+                    
+                    if showGrowth and data.growth and data.growth ~= "" then
+                        if line2Text ~= "" then
+                            line2Text = line2Text .. " " .. tostring(data.growth)
+                        else
+                            line2Text = tostring(data.growth)
+                        end
+                    end
+                    
+                    if line2Text ~= "" then
+                        table.insert(lines, line2Text)
+                    end
+
+                    -- Meter Distance Calculation (Studs to Meters: divide studs by 2.8)
+                    if showDistance then
+                        local distMeters = math.floor(distStuds / 2.8)
+                        table.insert(lines, tostring(distMeters) .. "m")
+                    end
+                    
+                    -- Directly overwrite the existing label's text cleanly with single text formatting
+                    label.Text = table.concat(lines, "\n")
+                end
+            end
+        end
+    end
+end
+
+local function clearPriorExtinctionESP()
+    for model, data in pairs(activeTags) do
+        pcall(function()
+            if data and data.tag then data.tag:Destroy() end
+        end)
+    end
+    table.clear(activeTags)
+    if espContainer then
+        pcall(function()
+            espContainer:Destroy()
+        end)
+        espContainer = nil
+    end
+end
+
+local isLooping = false
 task.spawn(function()
-	while true do
-		task.wait(1.5)
-		if carcassScannerActive then
-			pcall(function()
-				local activeScan = {}
-				for _, item in ipairs(Workspace:GetChildren()) do
-					if (item:IsA("BasePart") or item:IsA("Model")) and isFoodNode(item) then
-						activeScan[item] = true
-						local adornee = item:IsA("Model") and (item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart")) or item
-						if adornee and adornee:IsA("BasePart") then
-							if not activeCarcassGuis[item] then createCarcassOverlay(item, adornee) end
-							local gui = activeCarcassGuis[item]
-							local label = gui and gui:FindFirstChildOfClass("TextLabel")
-							if label then
-								local yield, spoil, isRotten = getCarcassData(item)
-								if isRotten then
-									local flash = (math.floor(os.clock() * 3) % 2 == 0)
-									label.TextColor3 = flash and Color3.fromRGB(220, 0, 0) or Color3.fromRGB(255, 140, 0)
-									label.Text = string.format("[%s]\n[TOXIC - ROTTEN]\nYield: %d pts", string.upper(item.Name), yield)
-								else
-									label.TextColor3 = Color3.fromRGB(255, 165, 0)
-									label.Text = string.format("[%s]\nYield: %d pts\nSpoils: %ds", string.upper(item.Name), yield, spoil)
-								end
-							end
-						end
-					end
-				end
-				for item, gui in pairs(activeCarcassGuis) do
-					if not activeScan[item] or not item.Parent then
-						if gui then gui:Destroy() end
-						activeCarcassGuis[item] = nil
-					end
-				end
-			end)
-		end
-	end
+    while true do
+        if _G.ToggleESP then
+            isLooping = true
+            pcall(scanEnvironment)
+            pcall(handleDynamicUpdates)
+        else
+            if isLooping then
+                isLooping = false
+                clearPriorExtinctionESP()
+            end
+        end
+        task.wait(1)
+    end
 end)
 
---------------------------------------------------------------------------------
--- CORE RENDERING RUNTIME LOOP (Executed Every Frame)
--- Each major module is isolated inside its own pcall bubble for safety
---------------------------------------------------------------------------------
-_G.MasterUtilityConnections.RenderStepped = RunService.RenderStepped:Connect(function()
-	local localPos = getLocalPlayerPosition()
-	local char = localPlayer.Character
-	local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart) :: BasePart?
 
-	-- isolated pcall block 1: Environmental Clearances (Water & Horizon Overrides)
-	pcall(function()
-		if environmentOverridesEnabled then
-			terrain.WaterTransparency = 1
-			terrain.WaterReflectance = 0
-			if Lighting.FogEnd ~= 999999 then Lighting.FogEnd = 999999 end
-			for _, child in ipairs(Lighting:GetChildren()) do
-				if child:IsA("Atmosphere") and child.Density ~= 0 then child.Density = 0 end
-			end
-		end
+-- ============================================================================
+-- AUTOWALK & AUTOGROW OBSTACLE-AVOIDANCE SIMULATION ENGINES
+-- ============================================================================
 
-		if bypassSleepEnabled then
-			for frame in pairs(registeredSleepOverlays or {}) do
-				if frame and frame.Parent then
-					if frame.Visible then frame.Visible = false end
-					if frame.BackgroundTransparency < 1 then frame.BackgroundTransparency = 1 end
-				else
-					registeredSleepOverlays[frame] = nil
-				end
-			end
-		end
-	end)
+local blacklistedFoliage = {}
 
-	-- isolated pcall block 2: Fullbright Processing
-	pcall(function()
-		if fullbrightActive then
-			Lighting.GlobalShadows = false
-			Lighting.Ambient = Color3.fromRGB(255, 255, 255)
-			Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
-			Lighting.Brightness = 2
-			Lighting.ClockTime = 12
-		end
-	end)
+local function pressKey(key)
+    if not activeKeys[key] then
+        activeKeys[key] = true
+        pcall(function()
+            VirtualUser:SetKeyDown(key:lower())
+        end)
+    end
+end
 
-	-- isolated pcall block 3: Bite Range Finder Latency Compensation Updates
-	pcall(function()
-		if rangeFinderActive and char and root then
-			local headPart = char:FindFirstChild("Head") or root
-			if headPart then
-				if not rangeSpherePart or rangeSpherePart.Parent ~= Workspace then
-					createRangeSphere(headPart)
-				end
+local function releaseKey(key)
+    if activeKeys[key] then
+        activeKeys[key] = nil
+        pcall(function()
+            VirtualUser:SetKeyUp(key:lower())
+        end)
+    end
+end
 
-				local targetInBiteRange = false
-				local closestTargetRoot: BasePart? = nil
-				local closestDistance = math.huge
+local function releaseAllKeys()
+    for key, _ in pairs(activeKeys) do
+        releaseKey(key)
+    end
+end
 
-				-- Scan and map nearest hostile target
-				for model in pairs(potentialTargets or {}) do
-					if model == char then continue end
-					local targetName = string.lower(model.Name)
-					
-					-- Whitelist check via robust, case-insensitive helper checks
-					local isWhitelisted = checkIsWhitelisted(targetName)
-					if not isWhitelisted then
-						local playerObj = Players:FindFirstChild(model.Name)
-						if playerObj and checkIsWhitelisted(playerObj.DisplayName) then
-							isWhitelisted = true
-						end
-					end
+local function getNearestDinoPosition()
+    local nearestPos = nil
+    local nearestDist = math.huge
+    local localCharacter = localPlayer and localPlayer.Character
+    local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
+    if not localRoot then return nil end
 
-					if not isWhitelisted then
-						local targetPos = getEntityPosition(model)
-						if targetPos then
-							local distance = (headPart.Position - targetPos).Magnitude
-							if distance < closestDistance then
-								closestDistance = distance
-								closestTargetRoot = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
-							end
-						end
-					end
-				end
+    for model, data in pairs(activeTags) do
+        if model and model.Parent and model ~= localCharacter then
+            local part = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or (data.tag and data.tag.Adornee)
+            if part then
+                local dist = (localRoot.Position - part.Position).Magnitude
+                if dist < nearestDist then
+                    nearestDist = dist
+                    nearestPos = part.Position
+                end
+            end
+        end
+    end
+    return nearestPos
+end
 
-				-- Determine strike eligibility (unmodified by visual offset)
-				if closestDistance <= BASE_ATTACK_RANGE then
-					targetInBiteRange = true
-				end
+local function getNearestFoliagePosition()
+    local nearestFoliage = nil
+    local nearestDist = math.huge
+    local localCharacter = localPlayer and localPlayer.Character
+    local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
+    if not localRoot then return nil, nil end
 
-				-- Apply Latency Compensated Offsets
-				if rangeSpherePart then
-					local ping = getPlayerPing() or 0.05
-					local myVelocity = if root and root:IsA("BasePart") then root.AssemblyLinearVelocity else Vector3.new()
-					local targetVelocity = Vector3.new()
-					
-					if closestTargetRoot and closestTargetRoot:IsA("BasePart") then
-						targetVelocity = closestTargetRoot.AssemblyLinearVelocity
-					end
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        if desc:IsA("Model") or desc:IsA("BasePart") then
+            local nameL = desc.Name:lower()
+            if (nameL:find("foliage") or nameL:find("tree") or nameL:find("fern") or nameL:find("bush") or nameL:find("berry") or nameL:find("food") or nameL:find("leaves")) and not blacklistedFoliage[desc] then
+                local part = desc:IsA("BasePart") and desc or desc:FindFirstChildOfClass("BasePart") or desc.PrimaryPart
+                if part then
+                    local dist = (localRoot.Position - part.Position).Magnitude
+                    if dist < nearestDist then
+                        nearestDist = dist
+                        nearestFoliage = desc
+                    end
+                end
+            end
+        end
+    end
+    
+    if nearestFoliage then
+        local targetPart = nearestFoliage:IsA("BasePart") and nearestFoliage or nearestFoliage:FindFirstChildOfClass("BasePart") or nearestFoliage.PrimaryPart
+        return targetPart.Position, nearestFoliage
+    end
+    return nil, nil
+end
 
-					local relativeVelocity = myVelocity - targetVelocity
-					local displacementOffset = relativeVelocity * ping
+local function runAutowalk()
+    local character = localPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if not character or not humanoid or not hrp then return end
 
-					local maxOffsetLimit = 12
-					if displacementOffset.Magnitude > maxOffsetLimit then
-						displacementOffset = displacementOffset.Unit * maxOffsetLimit
-					end
+    -- Establish path agents with custom settings
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 5,
+        AgentHeight = 6,
+        AgentCanJump = true,
+        AgentSlopeLimit = 45,
+        Costs = {
+            SteepIncline = 100,
+            ObstacleZone = 100
+        }
+    })
 
-					rangeSpherePart.CFrame = CFrame.new(headPart.Position + displacementOffset)
+    local targetPos = _G.AutowalkTarget or getNearestDinoPosition()
+    if not targetPos then
+        -- Generate random wandering destination if no players/dinos are available on the map
+        local randomAngle = math.rad(math.random(0, 360))
+        targetPos = hrp.Position + Vector3.new(math.cos(randomAngle) * 50, 0, math.sin(randomAngle) * 50)
+    end
 
-					if targetInBiteRange then
-						rangeSpherePart.Color = Color3.fromRGB(255, 255, 255) -- neon white
-					else
-						rangeSpherePart.Color = Color3.fromRGB(150, 0, 0) -- warning red
-					end
-				end
-			end
-		else
-			clearRangeSphere()
-		end
-	end)
+    -- Compute the navigation routes
+    local success, errorMessage = pcall(function()
+        path:ComputeAsync(hrp.Position, targetPos)
+    end)
 
-	-- isolated pcall block 4: Track Pack Density Conditions
-	pcall(function()
-		local alliedPackCount = 0
-		if packDensityActive and localPos then
-			for model in pairs(potentialTargets or {}) do
-				if isAlliedPackModel(model) then
-					local targetPos = getEntityPosition(model)
-					if targetPos then
-						local distance = (localPos - targetPos).Magnitude
-						if distance <= 80 then alliedPackCount = alliedPackCount + 1 end
-					end
-				end
-			end
-			packSpacingHUD.Text = string.format("Pack Density: %d/4", alliedPackCount)
-			
-			if alliedPackCount <= 2 then
-				packSpacingHUD.TextColor3 = Color3.fromRGB(0, 200, 0)
-				centerWarning.Visible = false
-			elseif alliedPackCount == 3 then
-				packSpacingHUD.TextColor3 = Color3.fromRGB(255, 140, 0)
-				centerWarning.Visible = false
-			else
-				packSpacingHUD.TextColor3 = Color3.fromRGB(220, 0, 0)
-				local flashState = (math.floor(os.clock() * 4) % 2 == 0)
-				centerWarning.Visible = flashState
-				if flashState then packSpacingHUD.TextColor3 = Color3.fromRGB(255, 255, 255) end
-			end
-		else
-			packSpacingHUD.Text = "Pack Density: Off"
-			packSpacingHUD.TextColor3 = Color3.fromRGB(150, 150, 150)
-			centerWarning.Visible = false
-		end
-	end)
+    if success and path.Status == Enum.PathStatus.Success then
+        local waypoints = path:GetWaypoints()
+        for i = 2, #waypoints do
+            local masterAutowalkActive = _G.ToggleAutowalk or _G.Autowalk or _G.Misc_Autowalk
+            if not masterAutowalkActive or localPlayer.Character ~= character then break end
+            
+            local waypoint = waypoints[i]
+            local currentPos = hrp.Position
+            
+            -- Direction vector determination
+            local lookDirection = (waypoint.Position - currentPos).Unit
+            if lookDirection.Magnitude == 0 or tostring(lookDirection) == "nan, nan, nan" then
+                lookDirection = hrp.CFrame.LookVector
+            end
 
-	-- isolated pcall block 5: X-Ray Tracking Updates & Multi-Tier Proximity Warnings
-	pcall(function()
-		if trackingEnabled then
-			for model in pairs(potentialTargets or {}) do
-				if char and model == char then
-					potentialTargets[model] = nil
-					untrackEntity(model)
-					continue
-				end
+            -- Raycast parameters setup (exclude character & tags)
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterDescendantsInstances = {character, getESPContainer()}
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 
-				if not model:IsDescendantOf(Workspace) then
-					potentialTargets[model] = nil
-					untrackEntity(model)
-					continue
-				end
+            -- Horizontal Ray obstacle scan (avoid trees, rocks, steep terrain meshes)
+            local frontHit = workspace:Raycast(currentPos + Vector3.new(0, 2, 0), lookDirection * 15, raycastParams)
+            if frontHit then
+                -- Perpendicular turn retreat to avoid collision
+                releaseKey("W")
+                pressKey("A")
+                task.wait(0.5)
+                releaseKey("A")
+                break -- Recalculate path completely
+            end
 
-				-- Safe verification of LocalPlayer character positioning metrics
-				local localHasPosition = char and char.PrimaryPart ~= nil
+            -- Vertical Downward Ray cliff scan (avoid steep drops, hills, cliffs)
+            local forwardOffset = currentPos + lookDirection * 8
+            local downHit = workspace:Raycast(forwardOffset + Vector3.new(0, 5, 0), Vector3.new(0, -18, 0), raycastParams)
+            
+            if downHit then
+                -- Steep hill evaluation
+                local normal = downHit.Normal
+                local angle = math.deg(math.acos(normal.Y))
+                if angle > 45 then
+                    -- Halt and reverse steering
+                    releaseKey("W")
+                    pressKey("D")
+                    task.wait(0.5)
+                    releaseKey("D")
+                    break -- Recalculate path
+                end
+            else
+                -- Void detected (cliff edge)
+                releaseKey("W")
+                pressKey("S")
+                task.wait(0.4)
+                releaseKey("S")
+                pressKey("A")
+                task.wait(0.5)
+                releaseKey("A")
+                break -- Recalculate path
+            end
 
-				-- Whitelist filtration via case-insensitive helper checks
-				local isTargetWhitelisted = checkIsWhitelisted(model.Name)
-				if not isTargetWhitelisted then
-					local playerObject = Players:FindFirstChild(model.Name)
-					if playerObject and checkIsWhitelisted(playerObject.DisplayName) then
-						isTargetWhitelisted = true
-					end
-				end
+            -- Object Space Alignment Steering Calculations
+            local localTarget = hrp.CFrame:PointToObjectSpace(waypoint.Position)
+            local angle = math.deg(math.atan2(localTarget.X, -localTarget.Y))
 
-				local targetPos = getEntityPosition(model)
-				local adorneePart = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+            -- Steer Left vs Right input adjustments based on object space orientation coordinates
+            if math.abs(angle) > 15 then
+                if angle < 0 then
+                    pressKey("A")
+                    releaseKey("D")
+                else
+                    pressKey("D")
+                    releaseKey("A")
+                end
+            else
+                releaseKey("A")
+                releaseKey("D")
+            end
 
-				if not targetPos or not adorneePart then
-					untrackEntity(model)
-					continue
-				end
+            -- Walk forward if generally facing the target waypoint
+            if localTarget.Z < 0 or math.abs(angle) < 90 then
+                pressKey("W")
+            else
+                releaseKey("W")
+            end
+            
+            -- safety watchdog timer to prevent getting stuck
+            local reached = false
+            local timeout = 0
+            while not reached and timeout < 20 do
+                local loopCheckActive = _G.ToggleAutowalk or _G.Autowalk or _G.Misc_Autowalk
+                if not loopCheckActive then break end
+                if (hrp.Position - waypoint.Position).Magnitude < 4 then
+                    reached = true
+                end
+                task.wait(0.1)
+                timeout = timeout + 1
+            end
+        end
+    else
+        -- Unreachable target fallback direct walk input
+        pressKey("W")
+        task.wait(1)
+    end
+end
 
-				if not activeOverlays[model] then trackEntity(model, adorneePart) end
+local function runAutogrow()
+    local character = localPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if not character or not humanoid or not hrp then return end
 
-				-- Fetch and format identifiers
-				local speciesName = speciesCache[model]
-				if not speciesName then
-					speciesName = getDinoSpecies(model)
-					speciesCache[model] = speciesName
-				end
+    local targetPos, foliageInstance = getNearestFoliagePosition()
+    if not targetPos then
+        -- Generate random wandering destination if no foliage is detected
+        local randomAngle = math.rad(math.random(0, 360))
+        targetPos = hrp.Position + Vector3.new(math.cos(randomAngle) * 50, 0, math.sin(randomAngle) * 50)
+    end
 
-				local displayName = getPlayerDisplayName(model)
-				local identityLine = displayName .. " (" .. speciesName .. ")"
+    -- Compute the navigation routes
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 5,
+        AgentHeight = 6,
+        AgentCanJump = true,
+        AgentSlopeLimit = 45,
+    })
 
-				local curHp, maxHp = getEntityHealth(model)
-				local hpDisplay = string.format("HP: %d/%d", math.round(curHp), math.round(maxHp))
+    local success, errorMessage = pcall(function()
+        path:ComputeAsync(hrp.Position, targetPos)
+    end)
 
-				local weightDisplay = "Weight: N/A"
-				local rawWeight = getEntityWeight(model)
-				if rawWeight then
-					local numeric = tonumber(rawWeight)
-					weightDisplay = string.format("Weight: %s kg", tostring(numeric and math.round(numeric) or rawWeight))
-				end
+    if success and path.Status == Enum.PathStatus.Success then
+        local waypoints = path:GetWaypoints()
+        for i = 2, #waypoints do
+            if not _G.ToggleAutogrow or localPlayer.Character ~= character then break end
+            
+            local waypoint = waypoints[i]
+            local currentPos = hrp.Position
 
-				local distance = 0
-				local distanceDisplay = "Distance: N/A"
-				if localHasPosition and localPos then
-					distance = (localPos - targetPos).Magnitude
-					distanceDisplay = string.format("Distance: %d studs", math.round(distance))
-				end
+            -- Check distance to foliage to stop exactly 5 meters away (14 studs)
+            local distanceToFoliage = (currentPos - targetPos).Magnitude
+            if distanceToFoliage <= 14 then
+                releaseAllKeys()
+                
+                -- Simulate physical eat interaction input 'E'
+                pressKey("E")
+                task.wait(0.2)
+                releaseKey("E")
+                
+                -- Hold physical position to simulate eating action sequence
+                task.wait(3)
+                
+                -- Temporarily blacklist foliage to prevent infinite loop on the same eaten instance
+                if foliageInstance then
+                    blacklistedFoliage[foliageInstance] = true
+                    task.spawn(function()
+                        task.wait(15)
+                        blacklistedFoliage[foliageInstance] = nil
+                    end)
+                end
+                break
+            end
 
-				local overlay = activeOverlays[model]
-				if overlay then
-					local currentTier = 0
-					if localHasPosition then
-						if distance <= 50 then
-							currentTier = 3
-						elseif distance <= 100 then
-							currentTier = 2
-						elseif distance <= 200 then
-							currentTier = 1
-						end
-					end
+            -- Direction vector determination
+            local lookDirection = (waypoint.Position - currentPos).Unit
+            if lookDirection.Magnitude == 0 or tostring(lookDirection) == "nan, nan, nan" then
+                lookDirection = hrp.CFrame.LookVector
+            end
 
-					-- Alert colorization and notification triggers
-					if isTargetWhitelisted then
-						overlay.Label.TextColor3 = Color3.fromRGB(240, 240, 240)
-						triggeredAlerts[model] = nil
-					else
-						if currentTier == 3 then
-							overlay.Label.TextColor3 = Color3.fromRGB(220, 0, 0)
-						elseif currentTier == 2 then
-							overlay.Label.TextColor3 = Color3.fromRGB(255, 140, 0)
-						elseif currentTier == 1 then
-							overlay.Label.TextColor3 = Color3.fromRGB(0, 200, 0)
-						else
-							overlay.Label.TextColor3 = Color3.fromRGB(240, 240, 240)
-						end
+            -- Raycast parameters setup (exclude character & tags)
+            local raycastParams = RaycastParams.new()
+            raycastParams.FilterDescendantsInstances = {character, getESPContainer()}
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 
-						-- Dynamic Squelch and Escalation Alerts
-						if currentTier > 0 then
-							local lastTriggeredTier = triggeredAlerts[model] or 0
-							if currentTier > lastTriggeredTier then
-								triggeredAlerts[model] = currentTier
-								spawnProximityNotification(displayName, speciesName, distance, currentTier)
-							end
-						else
-							if distance >= 220 then triggeredAlerts[model] = nil end
-						end
-					end
+            -- Horizontal Ray obstacle scan (avoid trees, rocks, steep terrain meshes)
+            local frontHit = workspace:Raycast(currentPos + Vector3.new(0, 2, 0), lookDirection * 15, raycastParams)
+            if frontHit then
+                releaseKey("W")
+                pressKey("A")
+                task.wait(0.5)
+                releaseKey("A")
+                break -- Recalculate path completely
+            end
 
-					overlay.Label.Text = string.format(
-						"%s\n%s\n%s\n%s",
-						identityLine,
-						hpDisplay,
-						weightDisplay,
-						distanceDisplay
-					)
-				end
-			end
-		end
-	end)
+            -- Vertical Downward Ray cliff scan (avoid steep drops, hills, cliffs)
+            local forwardOffset = currentPos + lookDirection * 8
+            local downHit = workspace:Raycast(forwardOffset + Vector3.new(0, 5, 0), Vector3.new(0, -18, 0), raycastParams)
+            
+            if downHit then
+                -- Steep hill evaluation
+                local normal = downHit.Normal
+                local angle = math.deg(math.acos(normal.Y))
+                if angle > 45 then
+                    releaseKey("W")
+                    pressKey("D")
+                    task.wait(0.5)
+                    releaseKey("D")
+                    break -- Recalculate path
+                end
+            else
+                -- Void detected (cliff edge)
+                releaseKey("W")
+                pressKey("S")
+                task.wait(0.4)
+                releaseKey("S")
+                pressKey("A")
+                task.wait(0.5)
+                releaseKey("A")
+                break -- Recalculate path
+            end
+
+            -- Object Space Alignment Steering Calculations
+            local localTarget = hrp.CFrame:PointToObjectSpace(waypoint.Position)
+            local angle = math.deg(math.atan2(localTarget.X, -localTarget.Y))
+
+            -- Steer Left vs Right input adjustments based on object space orientation coordinates
+            if math.abs(angle) > 15 then
+                if angle < 0 then
+                    pressKey("A")
+                    releaseKey("D")
+                else
+                    pressKey("D")
+                    releaseKey("A")
+                end
+            else
+                releaseKey("A")
+                releaseKey("D")
+            end
+
+            -- Walk forward if generally facing the target waypoint
+            if localTarget.Z < 0 or math.abs(angle) < 90 then
+                pressKey("W")
+            else
+                releaseKey("W")
+            end
+            
+            -- safety watchdog timer to prevent getting stuck
+            local reached = false
+            local timeout = 0
+            while not reached and timeout < 20 do
+                if not _G.ToggleAutogrow then break end
+                if (hrp.Position - waypoint.Position).Magnitude < 4 then
+                    reached = true
+                end
+                task.wait(0.1)
+                timeout = timeout + 1
+            end
+        end
+    else
+        -- Unreachable target fallback direct walk input
+        local distanceToFoliage = (hrp.Position - targetPos).Magnitude
+        if distanceToFoliage <= 14 then
+            releaseAllKeys()
+            pressKey("E")
+            task.wait(0.2)
+            releaseKey("E")
+            task.wait(3)
+            if foliageInstance then
+                blacklistedFoliage[foliageInstance] = true
+                task.spawn(function()
+                    task.wait(15)
+                    blacklistedFoliage[foliageInstance] = nil
+                end)
+            end
+        else
+            pressKey("W")
+            task.wait(1)
+        end
+    end
+end
+
+-- Independent background thread handler for Autowalk loop execution
+local isAutowalking = false
+task.spawn(function()
+    while true do
+        local autowalkEnabled = _G.ToggleAutowalk or _G.Autowalk or _G.Misc_Autowalk
+        if autowalkEnabled then
+            isAutowalking = true
+            pcall(runAutowalk)
+        else
+            if isAutowalking then
+                isAutowalking = false
+                releaseAllKeys()
+            end
+        end
+        task.wait(0.1)
+    end
 end)
+
+-- Independent background thread handler for Autogrow loop execution
+local isAutogrowing = false
+task.spawn(function()
+    while true do
+        local autogrowEnabled = _G.ToggleAutogrow
+        if autogrowEnabled then
+            isAutogrowing = true
+            pcall(runAutogrow)
+        else
+            if isAutogrowing then
+                isAutogrowing = false
+                releaseAllKeys()
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+
+
+-- ScreenGui Clean Deconstruct listener to prevent visual state memory leaks
+screenGui.Destroying:Connect(function()
+    toggleClearWater(false)
+    toggleClearSleep(false)
+    _G.ToggleESP = false
+    _G.ToggleAutowalk = false
+    _G.ToggleAutogrow = false
+    releaseAllKeys()
+    clearPriorExtinctionESP()
+end)
+
+
+-- ============================================================================
+-- INTERACTIVE VISIBILITY KEYBIND TOGGLE (Non-Destructive Minimize API)
+-- ============================================================================
+
+-- Bind keyboard listener to cleanly switch active visibility without de-allocating configurations
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == currentKeybind then
+        screenGui.Enabled = not screenGui.Enabled
+    end
+end)
+
+
+-- ============================================================================
+-- DYNAMIC PAGE DATA DICTIONARY (Precisely structured 7-tab configuration)
+-- ============================================================================
+
+local pagesData = {
+    {
+        id = "Home",
+        title = "HOME PORTAL",
+        desc = "",
+        details = ""
+    },
+    {
+        id = "Combat",
+        title = "COMBAT CONFIGURATION",
+        desc = "Manage automated battle loops and security control limits.",
+        details = ""
+    },
+    {
+        id = "Visuals",
+        title = "VISUAL CONTROL ENGINE",
+        desc = "Configure visual elements, rendering rates, and custom overlay filters.",
+        details = ""
+    },
+    {
+        id = "ESP",
+        title = "EXTRA SENSORY PERCEPTION",
+        desc = "Manage dimensional entity outlines and bounding box vectors.",
+        details = ""
+    },
+    {
+        id = "Misc",
+        title = "MISCELLANEOUS CONTROLS",
+        desc = "Modify user options, logging channels, and auxiliary engine rules.",
+        details = "System Log: Autowalk Active\nObstacle Avoidance: Configured\nSlopes Cost Modifier: 100\nAgent Incline Limit: 45deg"
+    },
+    {
+        id = "Configs",
+        title = "INTERFACE CONFIGS",
+        desc = "Persistent configuration profiles compiled as JSON state formats.",
+        details = ""
+    },
+    {
+        id = "Feedback",
+        title = "USER FEEDBACK",
+        desc = "Report overlay bugs or features directly to remote research endpoints.",
+        details = ""
+    }
+}
+
+local activeButtons = {}
+local activePages = {}
+
+-- Event-driven page switching logic
+local function selectPage(targetId)
+    for id, pageFrame in pairs(activePages) do
+        pageFrame.Visible = (id == targetId)
+    end
+
+    local targetButton = activeButtons[targetId]
+    if targetButton then
+        highlightBox.Parent = targetButton
+        highlightBox.Visible = true
+    else
+        highlightBox.Visible = false
+    end
+end
+
+-- Generate Elements Dynamically
+for i, data in ipairs(pagesData) do
+    -- Create Sidebar Navigation Button
+    local navButton = Instance.new("TextButton")
+    navButton.Name = data.id .. "Btn"
+    navButton.Size = UDim2.new(1, 0, 0, 32)
+    navButton.BackgroundColor3 = BUTTON_BG
+    navButton.BackgroundTransparency = BUTTON_BG_TRANSPARENCY
+    navButton.BorderSizePixel = 0
+    navButton.Text = "   " .. data.id:upper()
+    navButton.TextColor3 = BUTTON_TEXT_COLOR
+    navButton.TextSize = 11
+    navButton.Font = FONT_FAMILY
+    navButton.TextXAlignment = Enum.TextXAlignment.Left
+    navButton.LayoutOrder = i
+    navButton.Parent = sidebar
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.Parent = navButton
+
+    local btnStroke = Instance.new("UIStroke")
+    btnStroke.Color = Color3.fromRGB(45, 25, 65)
+    btnStroke.Thickness = 1
+    btnStroke.Parent = navButton
+
+    activeButtons[data.id] = navButton
+
+    -- Create Content Page Frame
+    local pageFrame = Instance.new("Frame")
+    pageFrame.Name = "Page" .. data.id
+    pageFrame.Size = UDim2.new(1, 0, 1, 0)
+    pageFrame.BackgroundTransparency = 1
+    pageFrame.Visible = false
+    pageFrame.Parent = container
+
+    -- Specialized Page Building Cases
+    if data.id == "Home" then
+        -- Home Header Container
+        local homeHeader = Instance.new("Frame")
+        homeHeader.Name = "HomeHeader"
+        homeHeader.Size = UDim2.new(1, 0, 0, 60)
+        homeHeader.Position = UDim2.new(0, 0, 0, 0)
+        homeHeader.BackgroundTransparency = 1
+        homeHeader.Parent = pageFrame
+
+        -- Circular Player Avatar Headshot
+        local avatarImage = Instance.new("ImageLabel")
+        avatarImage.Name = "UserAvatar"
+        avatarImage.Size = UDim2.new(0, 50, 0, 50)
+        avatarImage.Position = UDim2.new(0, 0, 0.5, -25)
+        avatarImage.BackgroundTransparency = 1
+        avatarImage.Image = avatarUrl
+        avatarImage.Parent = homeHeader
+
+        local avatarCorner = Instance.new("UICorner")
+        avatarCorner.CornerRadius = UDim.new(1, 0)
+        avatarCorner.Parent = avatarImage
+
+        -- Two-Line Dynamic Greeting Layout
+        local greetingContainer = Instance.new("Frame")
+        greetingContainer.Name = "GreetingContainer"
+        greetingContainer.Size = UDim2.new(1, -62, 1, 0)
+        greetingContainer.Position = UDim2.new(0, 62, 0, 0)
+        greetingContainer.BackgroundTransparency = 1
+        greetingContainer.Parent = homeHeader
+
+        local line1Label = Instance.new("TextLabel")
+        line1Label.Name = "DynamicGreeting"
+        line1Label.Size = UDim2.new(1, 0, 0.5, 0)
+        line1Label.BackgroundTransparency = 1
+        line1Label.Text = "Good Day " .. displayName
+        line1Label.TextColor3 = TEXT_COLOR
+        line1Label.TextSize = 14
+        line1Label.Font = Enum.Font.GothamMedium
+        line1Label.TextXAlignment = Enum.TextXAlignment.Left
+        line1Label.TextYAlignment = Enum.TextYAlignment.Bottom
+        line1Label.Parent = greetingContainer
+
+        local line2Label = Instance.new("TextLabel")
+        line2Label.Name = "StaticWelcome"
+        line2Label.Size = UDim2.new(1, 0, 0.5, 0)
+        line2Label.Position = UDim2.new(0, 0, 0.5, 0)
+        line2Label.BackgroundTransparency = 1
+        line2Label.Text = "Welcome To T6 Hub"
+        line2Label.TextColor3 = LIGHT_TEXT
+        line2Label.TextSize = 12
+        line2Label.Font = FONT_FAMILY
+        line2Label.TextXAlignment = Enum.TextXAlignment.Left
+        line2Label.TextYAlignment = Enum.TextYAlignment.Top
+        line2Label.Parent = greetingContainer
+
+        -- Background chronological state checks to process dynamic hour parameters safely
+        task.spawn(function()
+            while task.wait(1) do
+                local dateTable = os.date("*t")
+                local hour = dateTable.hour
+
+                -- Construct localized hour string greeting segment
+                local greetingString = "Good Evening"
+                if hour < 12 then
+                    greetingString = "Good Morning"
+                elseif hour < 18 then
+                    greetingString = "Good Afternoon"
+                end
+
+                line1Label.Text = greetingString .. ", " .. displayName
+            end
+        end)
+
+    elseif data.id == "Configs" then
+        -- Core Titles
+        local pageTitle = Instance.new("TextLabel")
+        pageTitle.Size = UDim2.new(1, 0, 0, 24)
+        pageTitle.BackgroundTransparency = 1
+        pageTitle.Text = data.title
+        pageTitle.TextColor3 = ACCENT_COLOR
+        pageTitle.TextSize = 14
+        pageTitle.Font = Enum.Font.GothamBold
+        pageTitle.TextXAlignment = Enum.TextXAlignment.Left
+        pageTitle.Parent = pageFrame
+
+        local pageDesc = Instance.new("TextLabel")
+        pageDesc.Size = UDim2.new(1, 0, 0, 30)
+        pageDesc.Position = UDim2.new(0, 0, 0, 24)
+        pageDesc.BackgroundTransparency = 1
+        pageDesc.Text = data.desc
+        pageDesc.TextColor3 = LIGHT_TEXT
+        pageDesc.TextSize = 12
+        pageDesc.Font = FONT_FAMILY
+        pageDesc.TextWrapped = true
+        pageDesc.TextXAlignment = Enum.TextXAlignment.Left
+        pageDesc.TextYAlignment = Enum.TextYAlignment.Top
+        pageDesc.Parent = pageFrame
+
+        -- Active Config Card panel layout
+        local detailsPanel = Instance.new("Frame")
+        detailsPanel.Size = UDim2.new(1, 0, 1, -75)
+        detailsPanel.Position = UDim2.new(0, 0, 0, 65)
+        detailsPanel.BackgroundColor3 = PANEL_BG
+        detailsPanel.BackgroundTransparency = 0.4
+        detailsPanel.BorderSizePixel = 0
+        detailsPanel.Parent = pageFrame
+
+        local panelCorner = Instance.new("UICorner")
+        panelCorner.CornerRadius = UDim.new(0, 6)
+        panelCorner.Parent = detailsPanel
+
+        local panelStroke = Instance.new("UIStroke")
+        panelStroke.Color = Color3.fromRGB(40, 15, 60)
+        panelStroke.Thickness = 1
+        panelStroke.Parent = detailsPanel
+
+        -- Profile Save Box Section
+        local saveLabel = Instance.new("TextLabel")
+        saveLabel.Size = UDim2.new(1, -30, 0, 20)
+        saveLabel.Position = UDim2.new(0, 15, 0, 15)
+        saveLabel.BackgroundTransparency = 1
+        saveLabel.Text = "SAVE ACTIVE PROFILE"
+        saveLabel.TextColor3 = LIGHT_TEXT
+        saveLabel.TextSize = 11
+        saveLabel.Font = Enum.Font.GothamBold
+        saveLabel.TextXAlignment = Enum.TextXAlignment.Left
+        saveLabel.Parent = detailsPanel
+
+        local saveInput = Instance.new("TextBox")
+        saveInput.Size = UDim2.new(1, -155, 0, 30)
+        saveInput.Position = UDim2.new(0, 15, 0, 40)
+        saveInput.BackgroundColor3 = PANEL_BG
+        saveInput.BorderSizePixel = 0
+        saveInput.PlaceholderText = "Profile Name..."
+        saveInput.Text = ""
+        saveInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+        saveInput.TextSize = 12
+        saveInput.Font = FONT_FAMILY
+        saveInput.TextXAlignment = Enum.TextXAlignment.Left
+        saveInput.Parent = detailsPanel
+
+        local inputPadding = Instance.new("UIPadding")
+        inputPadding.PaddingLeft = UDim.new(0, 8)
+        inputPadding.Parent = saveInput
+
+        local inputCorner = Instance.new("UICorner")
+        inputCorner.CornerRadius = UDim.new(0, 4)
+        inputCorner.Parent = saveInput
+
+        local inputStroke = Instance.new("UIStroke")
+        inputStroke.Color = Color3.fromRGB(45, 25, 65)
+        inputStroke.Thickness = 1
+        inputStroke.Parent = saveInput
+
+        -- Interactive "Save Profile" Configuration button with crisp high-fidelity rendering
+        local saveBtn = Instance.new("TextButton")
+        saveBtn.Size = UDim2.new(0, 110, 0, 30)
+        saveBtn.Position = UDim2.new(1, -125, 0, 40)
+        saveBtn.BackgroundColor3 = BUTTON_BG
+        saveBtn.Text = "Save Profile"
+        saveBtn.TextColor3 = BUTTON_TEXT_COLOR
+        -- Anti-Aliasing Typography Adjustment: Defeat blurred rendering
+        saveBtn.TextScaled = false
+        saveBtn.TextSize = 14
+        saveBtn.RichText = true
+        saveBtn.Font = FONT_FAMILY
+        saveBtn.Parent = detailsPanel
+
+        local btnCorner = Instance.new("UICorner")
+        btnCorner.CornerRadius = UDim.new(0, 4)
+        btnCorner.Parent = saveBtn
+
+        local btnStroke = Instance.new("UIStroke")
+        btnStroke.Color = ACCENT_COLOR
+        btnStroke.Thickness = 1
+        btnStroke.Parent = saveBtn
+
+        -- Dropdown Container Profile Selector Section
+        local loadLabel = Instance.new("TextLabel")
+        loadLabel.Size = UDim2.new(1, -30, 0, 20)
+        loadLabel.Position = UDim2.new(0, 15, 0, 85)
+        loadLabel.BackgroundTransparency = 1
+        loadLabel.Text = "LOAD PROFILE CONFIGURATION"
+        loadLabel.TextColor3 = LIGHT_TEXT
+        loadLabel.TextSize = 11
+        loadLabel.Font = Enum.Font.GothamBold
+        loadLabel.TextXAlignment = Enum.TextXAlignment.Left
+        loadLabel.Parent = detailsPanel
+
+        -- Dropdown Header Button
+        local dropdownHeader = Instance.new("TextButton")
+        dropdownHeader.Size = UDim2.new(1, -30, 0, 30)
+        dropdownHeader.Position = UDim2.new(0, 15, 0, 110)
+        dropdownHeader.BackgroundColor3 = PANEL_BG
+        dropdownHeader.Text = "   Select Profile..."
+        dropdownHeader.TextColor3 = BUTTON_TEXT_COLOR
+        dropdownHeader.TextSize = 12
+        dropdownHeader.Font = FONT_FAMILY
+        dropdownHeader.TextXAlignment = Enum.TextXAlignment.Left
+        dropdownHeader.Parent = detailsPanel
+
+        local dropCorner = Instance.new("UICorner")
+        dropCorner.CornerRadius = UDim.new(0, 4)
+        dropCorner.Parent = dropdownHeader
+
+        local dropStroke = Instance.new("UIStroke")
+        dropStroke.Color = Color3.fromRGB(45, 25, 65)
+        dropStroke.Thickness = 1
+        dropStroke.Parent = dropdownHeader
+
+        local dropdownList = Instance.new("ScrollingFrame")
+        dropdownList.Size = UDim2.new(1, -30, 0, 90)
+        dropdownList.Position = UDim2.new(0, 15, 0, 142)
+        dropdownList.BackgroundColor3 = PANEL_BG
+        dropdownList.BorderSizePixel = 0
+        dropdownList.ScrollBarThickness = 4
+        dropdownList.ScrollBarImageColor3 = ACCENT_COLOR
+        dropdownList.Visible = false
+        dropdownList.ZIndex = 5
+        dropdownList.Parent = detailsPanel
+
+        local dropListCorner = Instance.new("UICorner")
+        dropListCorner.CornerRadius = UDim.new(0, 4)
+        dropListCorner.Parent = dropdownList
+
+        local dropListStroke = Instance.new("UIStroke")
+        dropListStroke.Color = ACCENT_COLOR
+        dropListStroke.Thickness = 1
+        dropListStroke.Parent = dropdownList
+
+        local dropdownLayout = Instance.new("UIListLayout")
+        dropdownLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        dropdownLayout.Parent = dropdownList
+
+        -- Expand/Collapse mechanism
+        dropdownHeader.MouseButton1Click:Connect(function()
+            dropdownList.Visible = not dropdownList.Visible
+        end)
+
+        -- Persistent Profile Management Engine: savefile/readfile mapping API
+        local function serializeConfiguration(name)
+            if not name or name == "" then return end
+            uiState.keybind = currentKeybind.Name -- Include active keybind mapping in compilation
+            local content = HttpService:JSONEncode(uiState)
+            if writefile then
+                pcall(function()
+                    writefile("T6Hub_" .. name .. ".json", content)
+                end)
+            end
+        end
+
+        local function deserializeConfiguration(name)
+            if not readfile then return end
+            local success, content = pcall(readfile, "T6Hub_" .. name .. ".json")
+            if success then
+                local decodeSuccess, decoded = pcall(function() return HttpService:JSONDecode(content) end)
+                if decodeSuccess and decoded then
+                    -- Reset and assign loaded properties cleanly
+                    if decoded.toggles then
+                        for label, state in pairs(decoded.toggles) do
+                            uiState.toggles[label] = state
+                            if toggleRegistry[label] then
+                                toggleRegistry[label](state)
+                            end
+                        end
+                    end
+                    if decoded.sliders then
+                        for label, value in pairs(decoded.sliders) do
+                            uiState.sliders[label] = value
+                            if sliderRegistry[label] then
+                                sliderRegistry[label](value)
+                            end
+                        end
+                    end
+                    if decoded.keybind then
+                        local foundKey = Enum.KeyCode[decoded.keybind]
+                        if foundKey then
+                            currentKeybind = foundKey
+                            if keybindUpdateRegistry then
+                                keybindUpdateRegistry(currentKeybind.Name)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Update and populate options inside our custom dropdown
+        local function rebuildDropdown()
+            -- Clear previous dynamically built elements
+            for _, child in ipairs(dropdownList:GetChildren()) do
+                if child:IsA("TextButton") then
+                    child:Destroy()
+                end
+            end
+
+            local files = {}
+            if listfiles then
+                local success, fileList = pcall(listfiles, "")
+                if success then
+                    for _, filepath in ipairs(fileList) do
+                        local match = filepath:match("T6Hub_(.*)%.json")
+                        if match then
+                            table.insert(files, match)
+                        end
+                    end
+                end
+            end
+
+            -- Rebuild listing elements
+            for _, configName in ipairs(files) do
+                local selectBtn = Instance.new("TextButton")
+                selectBtn.Size = UDim2.new(1, 0, 0, 30)
+                selectBtn.BackgroundColor3 = PANEL_BG
+                selectBtn.BackgroundTransparency = 1
+                selectBtn.Text = "   " .. configName
+                selectBtn.TextColor3 = LIGHT_TEXT
+                selectBtn.TextSize = 11
+                selectBtn.Font = FONT_FAMILY
+                selectBtn.TextXAlignment = Enum.TextXAlignment.Left
+                selectBtn.ZIndex = 6
+                selectBtn.Parent = dropdownList
+
+                selectBtn.MouseButton1Click:Connect(function()
+                    deserializeConfiguration(configName)
+                    dropdownHeader.Text = "   " .. configName
+                    dropdownList.Visible = false
+                end)
+            end
+            dropdownList.CanvasSize = UDim2.new(0, 0, 0, dropdownLayout.AbsoluteContentSize.Y)
+        end
+
+        saveBtn.MouseButton1Click:Connect(function()
+            local rawName = saveInput.Text:gsub("%s+", "")
+            if rawName ~= "" then
+                serializeConfiguration(rawName)
+                saveInput.Text = ""
+                rebuildDropdown()
+            end
+        end)
+
+        rebuildDropdown()
+
+        -- Keybind Configuration UI Component Section
+        local keybindLabel = Instance.new("TextLabel")
+        keybindLabel.Size = UDim2.new(1, -30, 0, 20)
+        keybindLabel.Position = UDim2.new(0, 15, 0, 155)
+        keybindLabel.BackgroundTransparency = 1
+        keybindLabel.Text = "MENU KEYBIND CONFIGURATION"
+        keybindLabel.TextColor3 = LIGHT_TEXT
+        keybindLabel.TextSize = 11
+        keybindLabel.Font = Enum.Font.GothamBold
+        keybindLabel.TextXAlignment = Enum.TextXAlignment.Left
+        keybindLabel.Parent = detailsPanel
+
+        local keybindBtn = Instance.new("TextButton")
+        keybindBtn.Size = UDim2.new(1, -30, 0, 30)
+        keybindBtn.Position = UDim2.new(0, 15, 0, 180)
+        keybindBtn.BackgroundColor3 = PANEL_BG
+        keybindBtn.Text = "   " .. currentKeybind.Name
+        keybindBtn.TextColor3 = BUTTON_TEXT_COLOR
+        keybindBtn.TextSize = 12
+        keybindBtn.Font = FONT_FAMILY
+        keybindBtn.TextXAlignment = Enum.TextXAlignment.Left
+        keybindBtn.Parent = detailsPanel
+
+        local keyCorner = Instance.new("UICorner")
+        keyCorner.CornerRadius = UDim.new(0, 4)
+        keyCorner.Parent = keybindBtn
+
+        local keyStroke = Instance.new("UIStroke")
+        keyStroke.Color = Color3.fromRGB(45, 25, 65)
+        keyStroke.Thickness = 1
+        keyStroke.Parent = keybindBtn
+
+        -- Listening logic for hardware capture event
+        local listeningForKey = false
+        keybindBtn.MouseButton1Click:Connect(function()
+            if listeningForKey then return end
+            listeningForKey = true
+            keybindBtn.Text = "   [Press Any Key]"
+
+            local keyCaptureConnection
+            keyCaptureConnection = UserInputService.InputBegan:Connect(function(input, gp)
+                if input.UserInputType == Enum.UserInputType.Keyboard then
+                    currentKeybind = input.KeyCode
+                    keybindBtn.Text = "   " .. currentKeybind.Name
+                    listeningForKey = false
+                    keyCaptureConnection:Disconnect()
+                end
+            end)
+        end)
+
+        -- Expose keybind label update function externally
+        keybindUpdateRegistry = function(keyName)
+            keybindBtn.Text = "   " .. keyName
+        end
+
+    elseif data.id == "Feedback" then
+        -- Bug report Feedback submission Panel
+        local pageTitle = Instance.new("TextLabel")
+        pageTitle.Size = UDim2.new(1, 0, 0, 24)
+        pageTitle.BackgroundTransparency = 1
+        pageTitle.Text = data.title
+        pageTitle.TextColor3 = ACCENT_COLOR
+        pageTitle.TextSize = 14
+        pageTitle.Font = Enum.Font.GothamBold
+        pageTitle.TextXAlignment = Enum.TextXAlignment.Left
+        pageTitle.Parent = pageFrame
+
+        local pageDesc = Instance.new("TextLabel")
+        pageDesc.Size = UDim2.new(1, 0, 0, 24)
+        pageDesc.Position = UDim2.new(0, 0, 0, 24)
+        pageDesc.BackgroundTransparency = 1
+        pageDesc.Text = data.desc
+        pageDesc.TextColor3 = LIGHT_TEXT
+        pageDesc.TextSize = 12
+        pageDesc.Font = FONT_FAMILY
+        pageDesc.TextWrapped = true
+        pageDesc.TextXAlignment = Enum.TextXAlignment.Left
+        pageDesc.TextYAlignment = Enum.TextYAlignment.Top
+        pageDesc.Parent = pageFrame
+
+        local detailsPanel = Instance.new("Frame")
+        detailsPanel.Size = UDim2.new(1, 0, 1, -75)
+        detailsPanel.Position = UDim2.new(0, 0, 0, 65)
+        detailsPanel.BackgroundColor3 = PANEL_BG
+        detailsPanel.BackgroundTransparency = 0.4
+        detailsPanel.BorderSizePixel = 0
+        detailsPanel.Parent = pageFrame
+
+        local panelCorner = Instance.new("UICorner")
+        panelCorner.CornerRadius = UDim.new(0, 6)
+        panelCorner.Parent = detailsPanel
+
+        local panelStroke = Instance.new("UIStroke")
+        panelStroke.Color = Color3.fromRGB(40, 15, 60)
+        panelStroke.Thickness = 1
+        panelStroke.Parent = detailsPanel
+
+        -- Multi-Line Feedback Input field
+        local feedbackInput = Instance.new("TextBox")
+        feedbackInput.Size = UDim2.new(1, -30, 1, -85)
+        feedbackInput.Position = UDim2.new(0, 15, 0, 15)
+        feedbackInput.BackgroundColor3 = PANEL_BG
+        feedbackInput.BorderSizePixel = 0
+        feedbackInput.MultiLine = true
+        feedbackInput.ClearTextOnFocus = false
+        feedbackInput.TextWrapped = true
+        feedbackInput.PlaceholderText = "Type your feedback here..."
+        feedbackInput.Text = ""
+        feedbackInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+        feedbackInput.TextSize = 12
+        feedbackInput.Font = FONT_FAMILY
+        feedbackInput.TextXAlignment = Enum.TextXAlignment.Left
+        feedbackInput.TextYAlignment = Enum.TextYAlignment.Top
+        feedbackInput.Parent = detailsPanel
+
+        local feedbackPadding = Instance.new("UIPadding")
+        feedbackPadding.PaddingLeft = UDim.new(0, 10)
+        feedbackPadding.PaddingTop = UDim.new(0, 10)
+        feedbackPadding.PaddingRight = UDim.new(0, 10)
+        feedbackPadding.Parent = feedbackInput
+
+        local feedbackInputCorner = Instance.new("UICorner")
+        feedbackInputCorner.CornerRadius = UDim.new(0, 6)
+        feedbackInputCorner.Parent = feedbackInput
+
+        local feedbackInputStroke = Instance.new("UIStroke")
+        feedbackInputStroke.Color = Color3.fromRGB(45, 25, 65)
+        feedbackInputStroke.Thickness = 1
+        feedbackInputStroke.Parent = feedbackInput
+
+        -- Interactive "Submit" feedback button with anti-aliasing typography adjustment
+        local submitBtn = Instance.new("TextButton")
+        submitBtn.Size = UDim2.new(1, -30, 0, 36)
+        submitBtn.Position = UDim2.new(0, 15, 1, -51)
+        submitBtn.BackgroundColor3 = BUTTON_BG
+        submitBtn.Text = "SUBMIT FEEDBACK"
+        submitBtn.TextColor3 = BUTTON_TEXT_COLOR
+        -- Anti-Aliasing Typography Adjustment: Defeat blurred rendering
+        submitBtn.TextScaled = false
+        submitBtn.TextSize = 14
+        submitBtn.RichText = true
+        submitBtn.Font = Enum.Font.GothamBold
+        submitBtn.Parent = detailsPanel
+
+        local submitCorner = Instance.new("UICorner")
+        submitCorner.CornerRadius = UDim.new(0, 6)
+        submitCorner.Parent = submitBtn
+
+        local submitStroke = Instance.new("UIStroke")
+        submitStroke.Color = ACCENT_COLOR
+        submitStroke.Thickness = 1.5
+        submitStroke.Parent = submitBtn
+
+        -- Webhook Routing Logic (Platform Compliant Forwarding Proxy)
+        submitBtn.MouseButton1Click:Connect(function()
+            local feedbackString = feedbackInput.Text
+            if feedbackString == "" then return end
+
+            local requestFunc = syn and syn.request or http and http.request or request
+            if requestFunc then
+                -- Package formatted secure JSON payload structure
+                local bodyPayload = {
+                    embeds = {
+                        {
+                            title = "User Feedback Received",
+                            color = 9175295, -- Dec representation of ACCENT_COLOR
+                            fields = {
+                                { name = "User DisplayName", value = displayName, inline = true },
+                                { name = "User ID", value = tostring(userId), inline = true },
+                                { name = "Feedback", value = feedbackString }
+                            }
+                        }
+                    }
+                }
+
+                -- Clean target submission through a secure platform-compliant proxy
+                task.spawn(function()
+                    pcall(function()
+                        requestFunc({
+                            Url = "https://webhook.lewisakura.moe/api/webhooks/1111111111111111/PlaceholderURLVariable",
+                            Method = "POST",
+                            Headers = { ["Content-Type"] = "application/json" },
+                            Body = HttpService:JSONEncode(bodyPayload)
+                        })
+                    end)
+                end)
+            end
+
+            feedbackInput.Text = ""
+        end)
+
+    else
+        -- Standard dynamic configuration template page layout (Combat/Visuals/Misc/ESP)
+        local pageTitle = Instance.new("TextLabel")
+        pageTitle.Size = UDim2.new(1, 0, 0, 24)
+        pageTitle.BackgroundTransparency = 1
+        pageTitle.Text = data.title
+        pageTitle.TextColor3 = ACCENT_COLOR
+        pageTitle.TextSize = 14
+        pageTitle.Font = Enum.Font.GothamBold
+        pageTitle.TextXAlignment = Enum.TextXAlignment.Left
+        pageTitle.Parent = pageFrame
+
+        local pageDesc = Instance.new("TextLabel")
+        pageDesc.Size = UDim2.new(1, 0, 0, 40)
+        pageDesc.Position = UDim2.new(0, 0, 0, 30)
+        pageDesc.BackgroundTransparency = 1
+        pageDesc.Text = data.desc
+        pageDesc.TextColor3 = LIGHT_TEXT
+        pageDesc.TextSize = 12
+        pageDesc.Font = FONT_FAMILY
+        pageDesc.TextWrapped = true
+        pageDesc.TextXAlignment = Enum.TextXAlignment.Left
+        pageDesc.TextYAlignment = Enum.TextYAlignment.Top
+        pageDesc.Parent = pageFrame
+
+        local detailsPanel = Instance.new("Frame")
+        detailsPanel.Size = UDim2.new(1, 0, 1, -85)
+        detailsPanel.Position = UDim2.new(0, 0, 0, 75)
+        detailsPanel.BackgroundColor3 = PANEL_BG
+        detailsPanel.BackgroundTransparency = 0.4
+        detailsPanel.BorderSizePixel = 0
+        detailsPanel.Parent = pageFrame
+
+        local panelCorner = Instance.new("UICorner")
+        panelCorner.CornerRadius = UDim.new(0, 6)
+        panelCorner.Parent = detailsPanel
+
+        local panelStroke = Instance.new("UIStroke")
+        panelStroke.Color = Color3.fromRGB(40, 15, 60)
+        panelStroke.Thickness = 1
+        panelStroke.Parent = detailsPanel
+
+        if data.id == "Visuals" or data.id == "Combat" or data.id == "ESP" or data.id == "Misc" then
+            local componentList = Instance.new("Frame")
+            componentList.Size = UDim2.new(1, -30, 1, -30)
+            componentList.Position = UDim2.new(0, 15, 0, 15)
+            componentList.BackgroundTransparency = 1
+            componentList.Parent = detailsPanel
+
+            local componentLayout = Instance.new("UIListLayout")
+            componentLayout.Padding = UDim.new(0, 12)
+            componentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+            componentLayout.Parent = componentList
+
+            if data.id == "Combat" then
+                createToggleComponent(componentList, "Aim Target Tracking")
+                createSliderComponent(componentList, "Smoothing Range Vector", 35)
+            elseif data.id == "Visuals" then
+                -- Clear Water Toggle
+                createToggleComponent(componentList, "Clear Water", function(state)
+                    toggleClearWater(state)
+                end)
+                -- Clear Sleep Toggle (Hides full-screen black sleep frames)
+                createToggleComponent(componentList, "Clear Sleep", function(state)
+                    toggleClearSleep(state)
+                end)
+                createSliderComponent(componentList, "Draw Render Distance Limit", 75)
+            elseif data.id == "ESP" then
+                -- ESP Active Toggle (Toggles global _G.ToggleESP variable)
+                createToggleComponent(componentList, "ESP Active", function(state)
+                    _G.ToggleESP = state
+                end)
+                -- Dynamic Modular Data Toggles
+                createToggleComponent(componentList, "Show Player Names", function(state)
+                    _G.ESP_ShowPlayerName = state
+                end)
+                createToggleComponent(componentList, "Show Dino Species", function(state)
+                    _G.ESP_ShowDinoName = state
+                end)
+                createToggleComponent(componentList, "Show Growth Stage", function(state)
+                    _G.ESP_ShowGrowthStage = state
+                end)
+                createToggleComponent(componentList, "Show Distance", function(state)
+                    _G.ESP_ShowDistance = state
+                end)
+                -- Dynamic Max Distance Limit range configurator slider integration
+                createDistanceSliderComponent(componentList, "ESP Max Distance", 50, 1500, _G.ESP_MaxDistance, function(val)
+                    _G.ESP_MaxDistance = val
+                end)
+            elseif data.id == "Misc" then
+                -- Autowalk Master Switch configuration inside Misc Tab
+                createToggleComponent(componentList, "Autowalk Active", function(state)
+                    _G.ToggleAutowalk = state
+                end)
+                createToggleComponent(componentList, "Autogrow Active", function(state)
+                    _G.ToggleAutogrow = state
+                end)
+                -- Dynamic text specifications detailing
+                if data.details and data.details ~= "" then
+                    local panelText = Instance.new("TextLabel")
+                    panelText.Size = UDim2.new(1, -20, 0, 80)
+                    panelText.Position = UDim2.new(0, 10, 0, 130)
+                    panelText.BackgroundTransparency = 1
+                    panelText.Text = data.details
+                    panelText.TextColor3 = TEXT_COLOR
+                    panelText.TextSize = 11
+                    panelText.Font = FONT_FAMILY
+                    panelText.TextXAlignment = Enum.TextXAlignment.Left
+                    panelText.TextYAlignment = Enum.TextYAlignment.Top
+                    panelText.TextWrapped = true
+                    panelText.LineHeight = 1.3
+                    panelText.Parent = componentList
+                end
+            end
+        else
+            if data.details and data.details ~= "" then
+                local panelText = Instance.new("TextLabel")
+                panelText.Size = UDim2.new(1, -20, 1, -20)
+                panelText.Position = UDim2.new(0, 10, 0, 10)
+                panelText.BackgroundTransparency = 1
+                panelText.Text = data.details
+                panelText.TextColor3 = TEXT_COLOR
+                panelText.TextSize = 11
+                panelText.Font = FONT_FAMILY
+                panelText.TextXAlignment = Enum.TextXAlignment.Left
+                panelText.TextYAlignment = Enum.TextYAlignment.Top
+                panelText.TextWrapped = true
+                panelText.LineHeight = 1.3
+                panelText.Parent = detailsPanel
+            end
+        end
+    end
+
+    activePages[data.id] = pageFrame
+
+    navButton.MouseButton1Click:Connect(function()
+        selectPage(data.id)
+    end)
+end
+
+-- Initialize default page selection state
+selectPage("Home")
+
+
+-- ============================================================================
+-- DYNAMIC TYPEWRITER INTRO LOGIC (Capitalized & Refined Timing)
+-- ============================================================================
+
+-- Create centered temporary "T6 HUB" label directly inside the Main Frame
+local introLabel = Instance.new("TextLabel")
+introLabel.Name = "BoundedIntroText"
+introLabel.Size = UDim2.new(1, 0, 1, 0)
+introLabel.Position = UDim2.new(0, 0, 0, 0)
+introLabel.BackgroundTransparency = 1
+introLabel.Text = "" -- Initialize empty per typewriter constraints
+introLabel.TextColor3 = Color3.fromRGB(200, 50, 255) -- Neon Purple
+introLabel.TextSize = 76
+introLabel.Font = Enum.Font.FredokaOne -- Round, smooth modern typeface
+introLabel.ZIndex = 4
+introLabel.Parent = mainFrame
+
+-- Start typewriter execution timeline sequence tracking (noticeably slower delay)
+local targetString = "T6 HUB"
+local characterDelay = 0.25 -- Increased delay so each letter typing out is distinct
+
+for i = 1, #targetString do
+    introLabel.Text = string.sub(targetString, 1, i)
+    task.wait(characterDelay)
+end
+
+-- Transition Hold: Hold the completed text stably on screen before reveal
+task.wait(0.8)
+
+-- Clean transition: Fade out typewriter loading text
+local fadeOutInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local fadeOutTween = TweenService:Create(introLabel, fadeOutInfo, {TextTransparency = 1})
+
+fadeOutTween:Play()
+fadeOutTween.Completed:Wait()
+
+-- Destroy the temporary intro text cleanly
+introLabel:Destroy()
+
+-- Main UI Reveal Phase: Safely toggle, reveal container backgrounds, borders, and main assets
+mainStroke.Transparency = 1 -- Setup outline to fade in
+mainStroke.Enabled = true
+
+local revealBgTween = TweenService:Create(mainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 0})
+local revealStrokeTween = TweenService:Create(mainStroke, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Transparency = 0})
+
+revealBgTween:Play()
+revealStrokeTween:Play()
+
+-- Yield slightly for layout rendering thread parity
+task.wait(0.1)
+
+headerFrame.Visible = true
+horizontalDivider.Visible = true
+sidebar.Visible = true
+verticalDivider.Visible = true
+container.Visible = true
